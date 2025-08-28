@@ -47,13 +47,13 @@ class Check(ABC):
     def raises(self, exception: type[Exception]) -> "RaisesCheck":
         return RaisesCheck(self, exception)
 
-    def __and__(self, other: Self) -> "Check":
+    def __and__(self, other: "Check") -> "AndCheck":
         return AndCheck(self, other)
 
-    def __or__(self, other: Self) -> "Check":
+    def __or__(self, other: "Check") -> "OrCheck":
         return OrCheck(self, other)
 
-    def __invert__(self) -> "Check":
+    def __invert__(self) -> "InvertedCheck":
         return InvertedCheck(self)
 
     def __bool__(self) -> bool:
@@ -131,7 +131,7 @@ class DelayedCheck(Check):
 
 class RepeatingAndCheck(AllCheck):
     def __init__(self, check: Check, times: int) -> None:
-        super().__init__(*repeat[Check](check, times))
+        super().__init__(*repeat(check, times))
         self._check: Check = check
         self._times: int = times
 
@@ -141,7 +141,7 @@ class RepeatingAndCheck(AllCheck):
 
 class RepeatingOrCheck(AnyCheck):
     def __init__(self, check: Check, times: int) -> None:
-        super().__init__(*repeat[Check](check, times))
+        super().__init__(*repeat(check, times))
         self._check: Check = check
         self._times: int = times
 
@@ -266,8 +266,8 @@ class WaitingCheck(TimeoutCheck):
     @override
     def __bool__(self) -> bool:
         try:
-            while not super().as_bool():
-                continue
+            while not super().__bool__():
+                time.sleep(0.01)
             return True
         except TimeoutException:
             return False
@@ -276,7 +276,7 @@ class WaitingCheck(TimeoutCheck):
         return bool(self)
 
     def __repr__(self) -> str:
-        return f"WatingCheck({self._check.__repr__()})"
+        return f"WaitingCheck({self._check.__repr__()})"
 
 
 class RaisesCheck(Check):
