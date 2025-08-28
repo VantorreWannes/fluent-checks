@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import datetime
 from itertools import repeat
 from threading import Event, Thread
 import time
@@ -37,7 +38,7 @@ class Check(ABC):
     def wait_for(self):
         return self.as_waiting().wait()
 
-    def with_deadline(self, deadline: float) -> "DeadlineCheck":
+    def with_deadline(self, deadline: datetime.datetime) -> "DeadlineCheck":
         return DeadlineCheck(self, deadline)
 
     def with_timeout(self, timeout: float) -> "TimeoutCheck":
@@ -228,20 +229,48 @@ class WaitingCheck(Check):
         return f"WatingCheck({self._check.__repr__()})"
 
 
+class DeadlineException(Exception):
+    def __init__(self, deadline: datetime.datetime) -> None:
+        super().__init__(
+            f"Polling did not complete by {deadline.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
+
 class DeadlineCheck(Check):
-    def __init__(self, check: Check, deadline: float) -> None:
-        super().__init__(lambda: bool(check) if time.time() < deadline else False)
+    def __init__(self, check: Check, deadline: datetime.datetime) -> None:
+        super().__init__(lambda: bool(check))
         self._check: Check = check
-        self._deadline: float = deadline
+        self._deadline: datetime.datetime = deadline
+
+    @override
+    def __bool__(self) -> bool:
+        if datetime.datetime.now() > self._deadline:
+            raise DeadlineException(deadline=self._deadline)
+        return self._condition()
 
     def __repr__(self) -> str:
         return f"DeadlineCheck({self._check.__repr__()}, {self._deadline})"
 
 
+class TimeoutException(Exception):
+    def __init__(self, _timeout: float) -> None:
+        super().__init__(f"Polling did not complete in {_timeout} seconds")
+
+
 class TimeoutCheck(DeadlineCheck):
     def __init__(self, check: Check, timeout: float) -> None:
-        super().__init__(check, time.time() + timeout)
+        super().__init__(
+            check,
+            datetime.datetime.now() + datetime.timedelta(seconds=timeout),
+        )
         self._timeout: float = timeout
+
+    @override
+    def __bool__(self) -> bool:
+        try:
+            return super().__bool__()
+        except DeadlineException:
+            raise TimeoutException(self._timeout)
 
     def __repr__(self) -> str:
         return f"TimeoutCheck({self._check.__repr__()}, {self._timeout})"
