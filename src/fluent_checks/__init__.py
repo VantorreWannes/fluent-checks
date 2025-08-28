@@ -11,7 +11,7 @@ type Condition = Callable[[], bool]
 class Check(ABC):
     def __init__(self, condition: Condition) -> None:
         super().__init__()
-        self._condition = condition
+        self._condition: Condition = condition
 
     @final
     def as_bool(self) -> bool:
@@ -20,17 +20,29 @@ class Check(ABC):
     def with_delay(self, delay: float) -> "DelayedCheck":
         return DelayedCheck(self, delay)
 
-    def succeeds_within(self, times: int) -> "RepeatingAndCheck":
-        return RepeatingAndCheck(self, times)
-
-    def is_consistent_for(self, times: int) -> "RepeatingOrCheck":
+    def succeeds_within(self, times: int) -> "RepeatingOrCheck":
         return RepeatingOrCheck(self, times)
+
+    def is_consistent_for(self, times: int) -> "RepeatingAndCheck":
+        return RepeatingAndCheck(self, times)
 
     def sometimes(self) -> "LoopingOrCheck":
         return LoopingOrCheck(self)
 
     def always(self) -> "LoopingAndCheck":
         return LoopingAndCheck(self)
+
+    def as_waiting(self) -> "WaitingCheck":
+        return WaitingCheck(self)
+
+    def wait_for(self):
+        return self.as_waiting().wait()
+
+    def with_deadline(self, deadline: float) -> "DeadlineCheck":
+        return DeadlineCheck(self, deadline)
+
+    def with_timeout(self, timeout: float) -> "TimeoutCheck":
+        return TimeoutCheck(self, timeout)
 
     def __and__(self, other: Self) -> "Check":
         return AndCheck(self, other)
@@ -73,7 +85,7 @@ class AndCheck(AllCheck):
         self._right: Check = right
 
     def __repr__(self) -> str:
-        return f"{self._left.__repr__()} or {self._right.__repr__()}"
+        return f"{self._left.__repr__()} and {self._right.__repr__()}"
 
 
 class OrCheck(AnyCheck):
@@ -129,6 +141,7 @@ class RepeatingOrCheck(AnyCheck):
     def __repr__(self) -> str:
         return f"RepeatingOrCheck({self._check.__repr__()}, {self._times})"
 
+
 class LoopingCheck(Check):
     def __init__(self, check: Check, initial_result: bool) -> None:
         super().__init__(lambda: bool(check))
@@ -141,29 +154,24 @@ class LoopingCheck(Check):
     def _loop(self) -> None:
         pass
 
-    def loop(self) -> None:
+    def __enter__(self) -> Self:
         if self._thread is None:
             self._thread = Thread(target=self._loop)
             self._thread.start()
+        return self
 
-    def stop(self) -> None:
+    def __exit__(self, type, value, traceback) -> None:
         if self._thread is not None and self._thread.is_alive():
             self._stop_event.set()
             self._thread.join()
             self._thread = None
 
-    def __enter__(self) -> Self:
-        self.loop()
-        return self
-
-    def __exit__(self, type, value, traceback) -> None:
-        self.stop()
-
+    @override
     def __bool__(self) -> bool:
         return self._result
 
     def __repr__(self) -> str:
-        return f"LoopingAndCheck({self._check.__repr__()})"
+        return f"LoopingCheck({self._check.__repr__()})"
 
 
 class LoopingAndCheck(LoopingCheck):
@@ -173,9 +181,12 @@ class LoopingAndCheck(LoopingCheck):
     @override
     def _loop(self) -> None:
         while not self._stop_event.is_set():
-            self._loop_ran_once = True
             if not self._check.as_bool():
                 self._result = False
+            time.sleep(0.01)
+
+    def __repr__(self) -> str:
+        return f"LoopingAndCheck({self._check.__repr__()})"
 
 
 class LoopingOrCheck(LoopingCheck):
@@ -186,15 +197,48 @@ class LoopingOrCheck(LoopingCheck):
     def _loop(self) -> None:
         while not self._stop_event.is_set():
             if self._check.as_bool():
-                self._result = True 
+                self._result = True
+            time.sleep(0.01)
+
+    def __repr__(self) -> str:
+        return f"LoopingOrCheck({self._check.__repr__()})"
 
 
-if __name__ == "__main__":
-    check = Check(lambda: random.random() < 0.25)
-    check = check.with_delay(1)
+class WaitingCheck(Check):
+    def __init__(self, check: Check) -> None:
+        super().__init__(lambda: bool(check))
+        self._check: Check = check
 
-    with check.sometimes() as is_true:
-        while True:
-            print(bool(is_true))
-            time.sleep(1)
+    @override
+    def __bool__(self) -> bool:
+        while not self._check:
+            continue
+        return True
+
+    def wait(self) -> None:
+        bool(self)
+
+    def __repr__(self) -> str:
+        return f"WatingCheck({self._check.__repr__()})"
+
+
+class DeadlineCheck(Check):
+    def __init__(self, check: Check, deadline: float) -> None:
+        super().__init__(lambda: bool(check) if time.time() < deadline else False)
+        self._check: Check = check
+        self._deadline: float = deadline
+
+    def __repr__(self) -> str:
+        return f"DeadlineCheck({self._check.__repr__()}, {self._deadline})"
+
+
+class TimeoutCheck(DeadlineCheck):
+    def __init__(self, check: Check, timeout: float) -> None:
+        super().__init__(check, time.time() + timeout)
+        self._timeout: float = timeout
+
+    def __repr__(self) -> str:
+        return f"TimeoutCheck({self._check.__repr__()}, {self._timeout})"
+
+
 
