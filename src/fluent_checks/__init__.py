@@ -266,7 +266,7 @@ class WaitingCheck(TimeoutCheck):
     @override
     def __bool__(self) -> bool:
         try:
-            while not self._check:
+            while not super().as_bool():
                 continue
             return True
         except TimeoutException:
