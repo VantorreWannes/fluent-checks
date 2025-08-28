@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 from itertools import repeat
-import random
 from threading import Event, Thread
 import time
 from typing import Callable, Optional, Self, final, override
@@ -44,6 +43,9 @@ class Check(ABC):
     def with_timeout(self, timeout: float) -> "TimeoutCheck":
         return TimeoutCheck(self, timeout)
 
+    def raises(self, exception: type[Exception]) -> "RaisesCheck":
+        return RaisesCheck(self, exception)
+
     def __and__(self, other: Self) -> "Check":
         return AndCheck(self, other)
 
@@ -57,7 +59,11 @@ class Check(ABC):
         return self._condition()
 
     def __repr__(self) -> str:
-        return f"Check({self.as_bool()})"
+        try:
+            result = self.as_bool()
+        except Exception:
+            result = "<error>"
+        return f"Check({result})"
 
 
 class AllCheck(Check):
@@ -241,4 +247,18 @@ class TimeoutCheck(DeadlineCheck):
         return f"TimeoutCheck({self._check.__repr__()}, {self._timeout})"
 
 
+class RaisesCheck(Check):
+    def __init__(self, check: Check, exception: type[Exception]) -> None:
+        super().__init__(condition=lambda: bool(check))
+        self._check: Check = check
+        self._exception: type[Exception] = exception
 
+    def __bool__(self) -> bool:
+        try:
+            self._condition()
+            return False
+        except self._exception:
+            return True
+
+    def __repr__(self) -> str:
+        return f"RaisesCheck({self._check.__repr__()}, {self._exception.__name__})"
