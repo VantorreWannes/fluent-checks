@@ -32,11 +32,11 @@ class Check(ABC):
     def always(self) -> "LoopingAndCheck":
         return LoopingAndCheck(self)
 
-    def as_waiting(self) -> "WaitingCheck":
-        return WaitingCheck(self)
+    def as_waiting(self, timeout: float) -> "WaitingCheck":
+        return WaitingCheck(self, timeout)
 
-    def wait_for(self):
-        return self.as_waiting().wait()
+    def wait_for(self, timeout: float) -> bool:
+        return self.as_waiting(timeout).wait()
 
     def with_deadline(self, deadline: datetime.datetime) -> "DeadlineCheck":
         return DeadlineCheck(self, deadline)
@@ -211,24 +211,6 @@ class LoopingOrCheck(LoopingCheck):
         return f"LoopingOrCheck({self._check.__repr__()})"
 
 
-class WaitingCheck(Check):
-    def __init__(self, check: Check) -> None:
-        super().__init__(lambda: bool(check))
-        self._check: Check = check
-
-    @override
-    def __bool__(self) -> bool:
-        while not self._check:
-            continue
-        return True
-
-    def wait(self) -> None:
-        bool(self)
-
-    def __repr__(self) -> str:
-        return f"WatingCheck({self._check.__repr__()})"
-
-
 class DeadlineException(Exception):
     def __init__(self, deadline: datetime.datetime) -> None:
         super().__init__(
@@ -274,6 +256,27 @@ class TimeoutCheck(DeadlineCheck):
 
     def __repr__(self) -> str:
         return f"TimeoutCheck({self._check.__repr__()}, {self._timeout})"
+
+
+class WaitingCheck(TimeoutCheck):
+    def __init__(self, check: Check, timeout: float) -> None:
+        super().__init__(check, timeout)
+        self._check: Check = check
+
+    @override
+    def __bool__(self) -> bool:
+        try:
+            while not self._check:
+                continue
+            return True
+        except TimeoutException:
+            return False
+
+    def wait(self) -> bool:
+        return bool(self)
+
+    def __repr__(self) -> str:
+        return f"WatingCheck({self._check.__repr__()})"
 
 
 class RaisesCheck(Check):
