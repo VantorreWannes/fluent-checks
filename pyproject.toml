@@ -1,6 +1,6 @@
 [project]
 name = "fluent-checks"
-version = "0.1.1"
+version = "0.1.2"
 description = "A library for creating fluent, readable, and composable checks for your tests or application logic."
 readme = "README.md"
 authors = [{ name = "vantorrewannes", email = "vantorrewannes@gmail.com" }]
@@ -9,7 +9,6 @@ requires-python = ">=3.12"
 dependencies = []
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
