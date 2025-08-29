@@ -7,6 +7,8 @@ from fluent_checks import (
     AllCheck,
     AnyCheck,
     DeadlineException,
+    FailsWithinCheck,
+    SucceedsWithinCheck,
     TimeoutException,
 )
 
@@ -28,8 +30,8 @@ def crash_check():
 
 
 def test_basic_check():
-    assert Check(lambda: True).as_bool()
-    assert not Check(lambda: False).as_bool()
+    assert Check(lambda: True).check()
+    assert not Check(lambda: False).check()
     assert bool(Check(lambda: True))
     assert not bool(Check(lambda: False))
 
@@ -140,55 +142,88 @@ def test_repeating_or_check():
         counter += 1
         return counter >= 3
 
-    assert bool(Check(condition_eventually_succeeds).succeeds_within(5))
+    assert bool(Check(condition_eventually_succeeds).succeeds_in_attempts(5))
 
     counter = 0
-    assert not bool(Check(condition_eventually_succeeds).succeeds_within(2))
+    assert not bool(Check(condition_eventually_succeeds).succeeds_in_attempts(2))
 
 
 def test_timeout_check():
-    # Test with_timeout
-    check = Check(lambda: False).with_timeout(0.1)
+    # Test with_timeout. This now returns a LoopingCheck that should be used as a context manager.
+    check_false = Check(lambda: False).with_timeout(0.1)
     with pytest.raises(TimeoutException):
-        # This will keep evaluating to False until the timeout is hit
-        while True:
-            bool(check)
+        with check_false:  # Starts the background polling
+            # Loop until the check's internal deadline is hit, which raises TimeoutException
+            while True:
+                bool(check_false)
+                time.sleep(0.01)
 
-    check_true = Check(lambda: True).with_timeout(0.1)
-    assert bool(check_true)  # Should not raise
+    # Test that it passes if condition is True before timeout
+    check_true = Check(lambda: True).with_timeout(1)
+    with check_true:
+        time.sleep(0.05)  # Allow thread to run and update result
+        assert bool(check_true)
 
 
 def test_deadline_check():
-    # Test with_deadline
+    # Test with_deadline, which is now a LoopingCheck
     deadline = datetime.datetime.now() + datetime.timedelta(seconds=0.1)
-    check = Check(lambda: False).with_deadline(deadline)
+    check_false = Check(lambda: False).with_deadline(deadline)
     with pytest.raises(DeadlineException):
-        while True:
-            bool(check)
+        with check_false:
+            while True:
+                bool(check_false)
+                time.sleep(0.01)
 
-    deadline_true = datetime.datetime.now() + datetime.timedelta(seconds=0.1)
+    deadline_true = datetime.datetime.now() + datetime.timedelta(seconds=1)
     check_true = Check(lambda: True).with_deadline(deadline_true)
-    assert bool(check_true)  # Should not raise
+    with check_true:
+        time.sleep(0.05)
+        assert bool(check_true)
 
 
 def test_waiting_check():
-    # Test wait_for
+    # Test as_waiting, which replaced wait_for
     state = False
 
     def condition_changes():
         return state
 
-    def change_state():
-        time.sleep(0.05)
+    def change_state_later(delay):
+        time.sleep(delay)
         nonlocal state
         state = True
 
-    threading.Thread(target=change_state).start()
+    threading.Thread(target=change_state_later, args=(0.05,)).start()
 
-    assert Check(condition_changes).wait_for(0.2)
+    assert bool(Check(condition_changes).as_waiting(0.2))
 
     state = False
-    assert not Check(condition_changes).wait_for(0.1)
+    assert not bool(Check(condition_changes).as_waiting(0.1))
+
+
+def test_looping_check_start_stop():
+    class State:
+        value = False
+
+    state = State()
+    check = Check(lambda: state.value).sometimes()  # LoopingOrCheck
+
+    assert not bool(check)  # Thread not started, initial value is False
+
+    check.start()
+    try:
+        assert not bool(check)  # Thread started, but state is still False
+        state.value = True
+        time.sleep(0.05)  # Give thread time to update the result
+        assert bool(check)
+    finally:
+        check.stop()
+
+    # Check that the result is latched after stopping
+    state.value = False
+    time.sleep(0.05)
+    assert bool(check)  # Result should not change after stop() is called
 
 
 def test_looping_or_check():
@@ -239,3 +274,53 @@ def test_raises_check():
     # Ensure it doesn't catch other exceptions
     with pytest.raises(KeyError):
         bool(Check(raise_key_error).raises(ValueError))
+
+
+def test_SucceedsWithin_class():
+    state = False
+
+    def condition():
+        return state
+
+    def change_state_later(delay):
+        time.sleep(delay)
+        nonlocal state
+        state = True
+
+    check = Check(condition)
+
+    # Succeeds
+    state = False
+    t = threading.Thread(target=change_state_later, args=(0.05,))
+    t.start()
+    assert bool(SucceedsWithinCheck(check, 0.2))
+    t.join()
+
+    # Fails
+    state = False
+    assert not bool(SucceedsWithinCheck(check, 0.1))
+
+
+def test_FailsWithin_class():
+    state = True
+
+    def condition():
+        return state
+
+    def change_state_later(delay):
+        time.sleep(delay)
+        nonlocal state
+        state = False
+
+    check = Check(condition)
+
+    # "Fails" (i.e. condition becomes False) within timeout -> succeeds
+    state = True
+    t = threading.Thread(target=change_state_later, args=(0.05,))
+    t.start()
+    assert bool(FailsWithinCheck(check, 0.2))
+    t.join()
+
+    # Stays True -> fails
+    state = True
+    assert not bool(FailsWithinCheck(check, 0.1))
