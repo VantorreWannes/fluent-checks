@@ -1,9 +1,10 @@
 from abc import ABC
+
 import datetime
 from itertools import repeat
 from threading import Event, Thread
 import time
-from typing import Callable, Optional, Self, override
+from typing import Callable, Generic, Optional, override, TypeVar
 
 type Condition = Callable[[], bool]
 
@@ -56,6 +57,9 @@ class Check(ABC):
         return OrCheck(self, other)
 
     def __invert__(self) -> "InvertedCheck":
+        return InvertedCheck(self)
+
+    def __not__(self) -> "InvertedCheck":
         return InvertedCheck(self)
 
     def __bool__(self) -> bool:
@@ -149,7 +153,7 @@ class RepeatingOrCheck(AnyCheck):
 
 class LoopingCheck(Check):
     def __init__(self, check: Check, initial_result: bool) -> None:
-        super().__init__(lambda: bool(check))
+        super().__init__(self.check)
         self._check: Check = check
         self._result = initial_result
         self._stop_event = Event()
@@ -160,26 +164,15 @@ class LoopingCheck(Check):
             self._result = self._check.check()
             time.sleep(0.025)
 
-    def start(self) -> Self:
+    def _start_thread_if_needed(self):
         if self._thread is None:
             self._thread = Thread(target=self._loop)
+            self._thread.daemon = True
             self._thread.start()
-        return self
-
-    def stop(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            self._stop_event.set()
-            self._thread.join()
-            self._thread = None
-
-    def __enter__(self) -> Self:
-        return self.start()
-
-    def __exit__(self, type, value, traceback) -> None:
-        return self.stop()
 
     @override
     def check(self) -> bool:
+        self._start_thread_if_needed()
         return self._result
 
     def __repr__(self) -> str:
@@ -263,18 +256,17 @@ class TimeoutCheck(DeadlineCheck):
         return f"TimeoutCheck({self._check.__repr__()}, {self._timeout})"
 
 
-class WaitingCheck(Check):
+class WaitingCheck(TimeoutCheck):
     def __init__(self, check: Check, timeout: float) -> None:
-        super().__init__(lambda: check.check())
+        super().__init__(check, timeout)
         self._check: Check = check
         self._timeout = timeout
 
     @override
     def check(self) -> bool:
         try:
-            with TimeoutCheck(self._check, self._timeout) as check:
-                while not check.check():
-                    time.sleep(0.025)
+            while not super().check():
+                time.sleep(0.025)
             return True
         except TimeoutException:
             return False
@@ -314,3 +306,16 @@ class FailsWithinCheck(SucceedsWithinCheck):
 
     def __repr__(self) -> str:
         return f"SucceedsWithin({self._check.__repr__()}, {self._timeout})"
+
+
+T = TypeVar("T")
+
+
+class IsEqualCheck(Check, Generic[T]):
+    def __init__(self, left_value: T, right_value: T) -> None:
+        super().__init__(lambda: left_value == right_value)
+        self._left_value = left_value
+        self._right_value = right_value
+
+    def __repr__(self) -> str:
+        return f"{self._left_value.__repr__()} == {self._right_value.__repr__()} "
