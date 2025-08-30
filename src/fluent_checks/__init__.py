@@ -312,25 +312,16 @@ class WaitingCheck(TimeoutCheck):
 
 class RaisesCheck(Check):
     def __init__(self, check: Check, exception: type[Exception]) -> None:
-        # We don't need a real condition for super, as we will override check().
-        super().__init__(condition=lambda: True)
+        def condition() -> bool:
+            try:
+                check.check()
+                return False
+            except exception:
+                return True
+
+        super().__init__(condition)
         self._check: Check = check
         self._exception: type[Exception] = exception
-
-    @override
-    def check(self) -> bool:
-        try:
-            self._check.check()
-            result = False  # No exception means the "raises" check fails
-        except self._exception:
-            result = True  # The expected exception was caught
-
-        # Handle callbacks for RaisesCheck itself
-        if result and self._on_success_callback:
-            self._on_success_callback()
-        elif not result and self._on_failure_callback:
-            self._on_failure_callback()
-        return result
 
     def __repr__(self) -> str:
         return f"RaisesCheck({self._check.__repr__()}, {self._exception.__name__})"

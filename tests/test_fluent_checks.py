@@ -111,7 +111,7 @@ def test_and_check(left, right, expected):
         (CHECK_FALSE, CHECK_FALSE, False),
     ],
 )
-def test_or_check(left, right, expected):
+def test_or_check(left: Check, right: Check, expected):
     assert (left | right).check() == expected
 
 
