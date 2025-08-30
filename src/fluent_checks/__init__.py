@@ -4,7 +4,8 @@ import datetime
 from itertools import repeat
 from threading import Event, Thread
 import time
-from typing import Callable, Generic, Optional, override, TypeVar
+from typing import Any, Callable, Generic, Optional, Protocol, Union, override, TypeVar
+import os
 
 type Condition = Callable[[], bool]
 
@@ -13,9 +14,28 @@ class Check(ABC):
     def __init__(self, condition: Condition) -> None:
         super().__init__()
         self._condition: Condition = condition
+        self._on_success_callback: Optional[Callable[[], None]] = None
+        self._on_failure_callback: Optional[Callable[[], None]] = None
 
     def check(self) -> bool:
-        return self._condition()
+        result = self._condition()
+        if result:
+            if self._on_success_callback:
+                self._on_success_callback()
+        else:
+            if self._on_failure_callback:
+                self._on_failure_callback()
+        return result
+
+    def on_success(self, callback: Callable[[], None]) -> "Check":
+        """Registers a callback to be executed when the check succeeds."""
+        self._on_success_callback = callback
+        return self
+
+    def on_failure(self, callback: Callable[[], None]) -> "Check":
+        """Registers a callback to be executed when the check fails."""
+        self._on_failure_callback = callback
+        return self
 
     def with_delay(self, delay: float) -> "DelayedCheck":
         return DelayedCheck(self, delay)
@@ -28,6 +48,10 @@ class Check(ABC):
 
     def succeeds_within(self, timeout: float) -> "SucceedsWithinCheck":
         return SucceedsWithinCheck(self, timeout)
+
+    def eventually(self, timeout: float) -> "SucceedsWithinCheck":
+        """Alias for succeeds_within for better readability."""
+        return self.succeeds_within(timeout)
 
     def fails_within(self, timeout: float) -> "FailsWithinCheck":
         return FailsWithinCheck(self, timeout)
@@ -288,16 +312,25 @@ class WaitingCheck(TimeoutCheck):
 
 class RaisesCheck(Check):
     def __init__(self, check: Check, exception: type[Exception]) -> None:
-        super().__init__(condition=lambda: bool(check))
+        # We don't need a real condition for super, as we will override check().
+        super().__init__(condition=lambda: True)
         self._check: Check = check
         self._exception: type[Exception] = exception
 
-    def __bool__(self) -> bool:
+    @override
+    def check(self) -> bool:
         try:
-            self._condition()
-            return False
+            self._check.check()
+            result = False  # No exception means the "raises" check fails
         except self._exception:
-            return True
+            result = True  # The expected exception was caught
+
+        # Handle callbacks for RaisesCheck itself
+        if result and self._on_success_callback:
+            self._on_success_callback()
+        elif not result and self._on_failure_callback:
+            self._on_failure_callback()
+        return result
 
     def __repr__(self) -> str:
         return f"RaisesCheck({self._check.__repr__()}, {self._exception.__name__})"
@@ -319,7 +352,48 @@ class FailsWithinCheck(SucceedsWithinCheck):
         return f"SucceedsWithin({self._check.__repr__()}, {self._timeout})"
 
 
-T = TypeVar("T")
+class FileExistsCheck(Check):
+    def __init__(self, path: str) -> None:
+        super().__init__(lambda: os.path.exists(path))
+        self._path = path
+
+    def __repr__(self) -> str:
+        return f"FileExists({self._path})"
+
+
+class DirectoryExistsCheck(Check):
+    def __init__(self, path: str) -> None:
+        super().__init__(lambda: os.path.isdir(path))
+        self._path = path
+
+    def __repr__(self) -> str:
+        return f"DirectoryExists({self._path})"
+
+
+class FileContainsCheck(Check):
+    def __init__(self, path: str, content: str) -> None:
+        def condition() -> bool:
+            if not os.path.exists(path):
+                return False
+            with open(path, "r") as f:
+                return content in f.read()
+
+        super().__init__(condition)
+        self._path = path
+        self._content = content
+
+    def __repr__(self) -> str:
+        return f"FileContains({self._path}, {self._content})"
+
+
+class RichComparable(Protocol):
+    def __lt__(self, other: Any) -> bool: ...
+    def __gt__(self, other: Any) -> bool: ...
+    def __eq__(self, other: Any) -> bool: ...
+    def __contains__(self, key: Any) -> bool: ...
+
+
+T = TypeVar("T", bound=RichComparable)
 
 
 class IsEqualCheck(Check, Generic[T]):
@@ -330,3 +404,55 @@ class IsEqualCheck(Check, Generic[T]):
 
     def __repr__(self) -> str:
         return f"{self._left_value.__repr__()} == {self._right_value.__repr__()} "
+
+
+class IsNotEqualCheck(Check, Generic[T]):
+    def __init__(self, left_value: T, right_value: T) -> None:
+        super().__init__(lambda: left_value != right_value)
+        self._left_value = left_value
+        self._right_value = right_value
+
+    def __repr__(self) -> str:
+        return f"{self._left_value.__repr__()} != {self._right_value.__repr__()} "
+
+
+class IsGreaterThanCheck(Check, Generic[T]):
+    def __init__(self, left_value: T, right_value: T) -> None:
+        super().__init__(lambda: left_value > right_value)
+        self._left_value = left_value
+        self._right_value = right_value
+
+    def __repr__(self) -> str:
+        return f"{self._left_value.__repr__()} > {self._right_value.__repr__()} "
+
+
+class IsLessThanCheck(Check, Generic[T]):
+    def __init__(self, left_value: T, right_value: T) -> None:
+        super().__init__(lambda: left_value < right_value)
+        self._left_value = left_value
+        self._right_value = right_value
+
+    def __repr__(self) -> str:
+        return f"{self._left_value.__repr__()} < {self._right_value.__repr__()} "
+
+
+class IsInCheck(Check, Generic[T]):
+    def __init__(self, member: T, container: T) -> None:
+        super().__init__(lambda: member in container)
+        self._member = member
+        self._container = container
+
+    def __repr__(self) -> str:
+        return f"{self._member.__repr__()} in {self._container.__repr__()}"
+
+
+class IsInstanceOfCheck(Check):
+    def __init__(
+        self, obj: object, class_or_tuple: Union[type, tuple[type, ...]]
+    ) -> None:
+        super().__init__(lambda: isinstance(obj, class_or_tuple))
+        self._obj = obj
+        self._class_or_tuple = class_or_tuple
+
+    def __repr__(self) -> str:
+        return f"isinstance({self._obj.__repr__()}, {self._class_or_tuple.__repr__()})"
