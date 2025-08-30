@@ -1,92 +1,216 @@
 # Fluent Checks
 
-[![PyPI version](https://badge.fury.io/py/fluent-checks.svg)](https://badge.fury.io/py/fluent-checks)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
-A Python library for creating readable, composable, and chainable conditions for tests or application logic.
+A Python library for creating fluent, readable, and composable checks for your tests or application logic.
 
 ## Installation
+
+Install the package using pip:
 
 ```bash
 pip install fluent-checks
 ```
 
-## Quickstart
+## Core Concepts
 
-`fluent-checks` helps you turn complex, imperative conditional logic into a clean, fluent API.
-
-**Instead of this:**
+The core of the library is the `Check` class. A `Check` is a simple wrapper around a function that returns a boolean (a `Condition`).
 ```python
-# Imperative style
+from fluent_checks import Check
+
+# Create a check from a lambda
+is_even = Check(lambda: 2 % 2 == 0)
+
+# Evaluate the check
+if is_even:
+    print("It's even!")
+
+# Or more explicitly
+assert bool(is_even) is True
+```
+
+## Usage
+### Combining Checks
+
+Checks can be combined using logical operators to create more complex conditions.
+```python
+a = Check(lambda: True)
+b = Check(lambda: False)
+
+assert bool(a & b) is False  # And
+assert bool(a | b) is True   # Or
+assert bool(~b) is True      # Not
+```
+
+### Waiting for Conditions
+
+You can wait for a condition to become true.
+```python
+import time
+
 start_time = time.time()
-file_created = False
-while time.time() - start_time < 5:
-    if os.path.exists("my_file.txt"):
-        file_created = True
-        break
-if not file_created:
-    raise AssertionError("File not created in 5 seconds")
+flaky_check = Check(lambda: time.time() - start_time > 2)
+
+# as_waiting will block until the check is true, or the timeout is reached.
+assert flaky_check.as_waiting(timeout=3) is True
+assert flaky_check.as_waiting(timeout=1) is False
 ```
 
-**You can write this:**
+### Timeouts and Deadlines
+
+You can enforce time limits on checks.
+
 ```python
-from fluent_checks import Check
-import os
+from datetime import datetime, timedelta
 
-# Fluent style
-file_exists = Check(lambda: os.path.exists("my_file.txt"))
+# This check will raise a TimeoutException if it takes longer than 1 second
+slow_check = Check(lambda: time.sleep(2) or True)
+failing_check = slow_check.with_timeout(1)
 
-# This line will block until the file exists or raise a TimeoutException after 5s
-file_exists.with_timeout(5).wait_for()
+try:
+    bool(failing_check)
+except TimeoutException:
+    print("Caught expected timeout!")
+
+# You can also use a specific deadline
+deadline = datetime.now() + timedelta(seconds=1)
+check_with_deadline = slow_check.with_deadline(deadline)
 ```
 
-## Core Features
+### Repeating Checks
 
-### 1. Combine Checks
-Use standard logical operators to combine checks.
+You can verify that a condition holds true multiple times.
+
 ```python
-from fluent_checks import Check
+# succeeds_in_attempts: True if the check passes at least once in 5 attempts
+flaky_check = Check(lambda: random.random() > 0.5)
+assert flaky_check.succeeds_in_attempts(5)
 
-is_ready = Check(lambda: service.status == "ready")
-is_healthy = Check(lambda: service.health > 0.9)
-
-# This will block until the service is both ready AND healthy
-(is_ready & is_healthy).wait_for()
+# is_consistent_for: True if the check passes 5 times in a row
+stable_check = Check(lambda: True)
+assert stable_check.is_consistent_for(5)
 ```
 
-### 2. Add Modifiers
-Chain methods to add conditions like timeouts, retries, or exception checks.
-
--   **Time-Based**:
-    -   `.with_timeout(seconds)`: Fails if the check doesn't pass within a time limit.
-    -   `.with_delay(seconds)`: Waits a fixed duration before checking.
-    -   `.with_deadline(datetime)`: Fails if the check doesn't pass by a specific time.
-
--   **Repetition**:
-    -   `.succeeds_within(attempts)`: Checks multiple times, succeeding if it passes at least once.
-    -   `.is_consistent_for(attempts)`: Succeeds only if the check passes on every attempt.
-
--   **Exception Handling**:
-    -   `.raises(ExceptionType)`: Succeeds if the wrapped function raises the specified exception.
-
-**Example with multiple modifiers:**
+### Looping Checks
+The `sometimes` and `always` checks will run in a background thread until they are explicitly stopped.
 ```python
-import random
+# The 'sometimes' check will pass if the condition is met at least once.
+check = Check(lambda: random.random() > 0.8).sometimes()
+time.sleep(1) # Give it some time to run
+assert bool(check) is True
+check.stop()
 
-# A check for a flaky API that should eventually return True
-flaky_api_call = Check(lambda: random.choice([True, False]))
-
-# Succeeds if the API returns True within 3 tries, waiting 0.5s between each try.
-check = flaky_api_call.with_delay(0.5).succeeds_within(3)
-
-if check:
-    print("API call succeeded!")
+# The 'always' check will only pass if the condition is met every single time.
+check = Check(lambda: random.random() > 0.2).always()
+time.sleep(1) # Give it some time to run
+assert bool(check) is False
+check.stop()
 ```
 
-## Contributing
+### Checking for Exceptions
 
-Contributions are welcome! Please open an issue to discuss your ideas.
+You can check that a piece of code raises a specific exception.
+
+```python
+def might_fail():
+    raise ValueError("Something went wrong")
+
+check = Check(might_fail).raises(ValueError)
+
+assert bool(check) is True
+```
+
+### Callbacks
+You can add callbacks to your checks, that will be executed on success or on failure.
+```python
+a = Check(lambda: True)
+a.on_success(lambda: print("I've passed"))
+a.on_failure(lambda: print("I've failed"))
+
+bool(a) # This will print "I've passed"
+```
+
+### File System Checks
+You can check for files and directories.
+```python
+# Check if a file exists
+assert FileExistsCheck("path/to/file")
+
+# Check if a directory exists
+assert DirectoryExistsCheck("path/to/dir")
+
+# Check if a file contains specific content
+assert FileContainsCheck("path/to/file", "content")
+```
+
+### Comparison Checks
+You can compare values.
+```python
+# Equality
+assert IsEqualCheck(1, 1)
+assert IsNotEqualCheck(1, 2)
+
+# Comparison
+assert IsGreaterThanCheck(2, 1)
+assert IsLessThanCheck(1, 2)
+
+# Containment
+assert IsInCheck(1, [1, 2, 3])
+
+# Instance
+assert IsInstanceOfCheck(1, int)
+```
+
+## API Overview
+
+### Base Class
+| Class/Method | Description |
+| --- | --- |
+| **`Check(condition: Callable[[], bool])`** | The base class for all checks. |
+| **`&`, `\|`, `~`** | Operators for AND, OR, and NOT logic. |
+| **`bool(check)`, `check.check()`** | Evaluates the check and returns the boolean result. |
+
+### Waiting and Timeouts
+| Class/Method | Description |
+| --- | --- |
+| **`as_waiting(timeout: float) -> WaitingCheck`** | Blocks until the check is `True` or the timeout expires. |
+| **`with_timeout(timeout: float) -> TimeoutCheck`** | Returns a new check that will raise a `TimeoutException` if it doesn't complete within the timeout. |
+| **`with_deadline(deadline: datetime) -> DeadlineCheck`** | Similar to `with_timeout` but uses an absolute deadline. |
+| **`succeeds_within(timeout: float) -> SucceedsWithinCheck`** | Checks if the condition is met at least once within a time limit. `eventually` is an alias for this. |
+| **`fails_within(timeout: float) -> FailsWithinCheck`** | Checks if the condition fails at least once within a time limit. |
+
+### Repeating and Looping
+| Class/Method | Description |
+| --- | --- |
+| **`succeeds_in_attempts(times: int) -> RepeatingOrCheck`** | Checks if the condition is met at least once within a number of tries. |
+| **`is_consistent_for(times: int) -> RepeatingAndCheck`** | Checks if the condition is met consecutively for a number of tries. |
+| **`sometimes() -> LoopingOrCheck`** | Runs the check in a background thread and succeeds if the condition is met at least once. Remember to call `stop()`.|
+| **`always() -> LoopingAndCheck`** | Runs the check in a background thread and succeeds only if the condition is always met. Remember to call `stop()`.|
+
+### Exceptions and Callbacks
+| Class/Method | Description |
+| --- | --- |
+| **`raises(exception: type[Exception]) -> RaisesCheck`** | Checks if the condition raises a specific exception. |
+| **`on_success(callback: Callable[[], None]) -> Check`** | Registers a callback to be executed when the check succeeds. |
+| **`on_failure(callback: Callable[[], None]) -> Check`** | Registers a callback to be executed when the check fails. |
+
+### File System
+| Class/Method | Description |
+| --- | --- |
+| **`FileExistsCheck(path: str)`** | Checks if a file exists at the given path. |
+| **`DirectoryExistsCheck(path: str)`** | Checks if a directory exists at the given path. |
+| **`FileContainsCheck(path: str, content: str)`** | Checks if a file at the given path contains the given content. |
+
+### Comparisons
+| Class/Method | Description |
+| --- | --- |
+| **`IsEqualCheck(left, right)`** | Checks if `left == right`. |
+| **`IsNotEqualCheck(left, right)`** | Checks if `left != right`. |
+| **`IsGreaterThanCheck(left, right)`** | Checks if `left > right`. |
+| **`IsLessThanCheck(left, right)`** | Checks if `left < right`. |
+| **`IsInCheck(member, container)`** | Checks if `member in container`. |
+| **`IsInstanceOfCheck(obj, class_or_tuple)`** | Checks if `isinstance(obj, class_or_tuple)`. |
+
 
 ## License
 
-This project is licensed under the GNU GENERAL PUBLIC LICENSE.
+This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
+
