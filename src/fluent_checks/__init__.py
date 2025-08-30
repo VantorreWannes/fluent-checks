@@ -164,11 +164,22 @@ class LoopingCheck(Check):
             self._result = self._check.check()
             time.sleep(0.025)
 
-    def _start_thread_if_needed(self):
+    def _start_thread_if_needed(self) -> None:
         if self._thread is None:
+            self._stop_event.clear()
             self._thread = Thread(target=self._loop)
             self._thread.daemon = True
             self._thread.start()
+
+    def stop(self) -> None:
+        """Stops the background looping thread if it is running."""
+        if self._thread and self._thread.is_alive():
+            self._stop_event.set()
+            self._thread.join()
+        self._thread = None
+
+    def __del__(self) -> None:
+        self.stop()
 
     @override
     def check(self) -> bool:
@@ -224,9 +235,11 @@ class DeadlineCheck(LoopingCheck):
 
     @override
     def check(self) -> bool:
-        if datetime.datetime.now() > self._deadline:
-            raise DeadlineException(deadline=self._deadline)
-        return super().check()
+        while not super().check():
+            if datetime.datetime.now() > self._deadline:
+                raise DeadlineException(deadline=self._deadline)
+            time.sleep(0.025)
+        return True
 
     def __repr__(self) -> str:
         return f"DeadlineCheck({self._check.__repr__()}, {self._deadline})"
@@ -265,9 +278,7 @@ class WaitingCheck(TimeoutCheck):
     @override
     def check(self) -> bool:
         try:
-            while not super().check():
-                time.sleep(0.025)
-            return True
+            return super().check()
         except TimeoutException:
             return False
 
