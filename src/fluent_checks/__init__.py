@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from calendar import c
 import datetime
 from itertools import repeat
+from pathlib import Path
 from threading import Thread
 import time
 from typing import Any, Callable, Generic, Optional, Protocol, Self, Union, TypeVar
@@ -204,9 +205,17 @@ class WithSuccessCallbackCheck(Check):
         return result
 
 
-class WithFailureCallbackCheck(WithSuccessCallbackCheck):
+class WithFailureCallbackCheck(Check):
     def __init__(self, check: Check, callback: Callable[[], None]) -> None:
-        super().__init__(check.invert(), callback)
+        super().__init__()
+        self._check = check
+        self._callback = callback
+
+    def check(self) -> bool:
+        result = self._check.check()
+        if not result:
+            self._callback()
+        return result
 
 
 # --- Timing and Repetition Checks ---
@@ -221,13 +230,9 @@ class DeadlineExceededCheck(Check):
         return datetime.datetime.now() > self._deadline
 
 
-class TimeoutExceededCheck(Check):
+class TimeoutExceededCheck(DeadlineExceededCheck):
     def __init__(self, timeout: datetime.timedelta) -> None:
-        super().__init__()
-        self._timeout: datetime.timedelta = timeout
-
-    def check(self) -> bool:
-        return DeadlineExceededCheck(datetime.datetime.now() + self._timeout).check()
+        super().__init__(datetime.datetime.now() + timeout)
 
 
 class DelayedCheck(Check):
@@ -255,6 +260,34 @@ class RepeatingOrCheck(AnyCheck):
         self._times: int = times
 
 
+class CheckedLessTimesThanCheck(Check):
+    def __init__(self, times) -> None:
+        super().__init__()
+        self._times_checked = 0
+        self._max_times = times
+
+    def times_checked(self) -> int:
+        return self._times_checked
+
+    def check(self) -> bool:
+        self._times_checked += 1
+        return self.times_checked() < self._max_times
+
+
+class CheckedMoreTimesThanCheck(Check):
+    def __init__(self, times) -> None:
+        super().__init__()
+        self._times_checked: int = 0
+        self._max_times: int = times
+
+    def times_checked(self) -> int:
+        return self._times_checked
+
+    def check(self) -> bool:
+        self._times_checked += 1
+        return self.times_checked() > self._max_times
+
+
 class BackgroundCheck(Check):
     def __init__(self, check: Check) -> None:
         super().__init__()
@@ -263,7 +296,7 @@ class BackgroundCheck(Check):
         self._exception: Optional[Exception] = None
         self._thread: Optional[Thread] = None
 
-    def is_finished(self) -> CustomCheck:
+    def is_finished(self) -> Check:
         return CustomCheck(
             lambda: self._thread is not None and not self._thread.is_alive()
         )
@@ -318,7 +351,7 @@ class FinishesBeforeDeadlineCheck(Check):
         background_check = self._check.as_background().start()
         (
             DeadlineExceededCheck(self._deadline) | background_check.is_finished()
-        ).wait_until_true()
+        ).wait_until_true().check()
         return background_check.is_finished().check()
 
 
@@ -344,7 +377,7 @@ class IsTrueBeforeDeadlineCheck(Check):
         background_check = self._check.as_background().start()
         (
             DeadlineExceededCheck(self._deadline) | background_check.is_finished()
-        ).wait_until_true()
+        ).wait_until_true().check()
         return background_check.result() is True
 
 
@@ -389,7 +422,7 @@ class RaisesCheck(Check):
 
 
 class FileExistsCheck(Check):
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: Path) -> None:
         super().__init__()
         self._path = path
 
@@ -398,7 +431,7 @@ class FileExistsCheck(Check):
 
 
 class DirectoryExistsCheck(Check):
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: Path) -> None:
         super().__init__()
         self._path = path
 
@@ -407,7 +440,7 @@ class DirectoryExistsCheck(Check):
 
 
 class FileContainsCheck(Check):
-    def __init__(self, path: str, content: bytes) -> None:
+    def __init__(self, path: Path, content: bytes) -> None:
         super().__init__()
         self._path = path
         self._content = content
@@ -512,13 +545,13 @@ def is_instance_of(
     return IsInstanceOfCheck(obj, class_or_tuple)
 
 
-def file_exists(path: str) -> FileExistsCheck:
+def file_exists(path: Path) -> FileExistsCheck:
     return FileExistsCheck(path)
 
 
-def dir_exists(path: str) -> DirectoryExistsCheck:
+def dir_exists(path: Path) -> DirectoryExistsCheck:
     return DirectoryExistsCheck(path)
 
 
-def file_contains(path: str, content: bytes) -> FileContainsCheck:
+def file_contains(path: Path, content: bytes) -> FileContainsCheck:
     return FileContainsCheck(path, content)
