@@ -1,78 +1,117 @@
-from abc import ABC
-
+from abc import ABC, abstractmethod
 import datetime
 from itertools import repeat
-from threading import Event, Thread
+from pathlib import Path
+from threading import Thread
 import time
-from typing import Any, Callable, Generic, Optional, Protocol, Union, override, TypeVar
+from typing import Any, Callable, Generic, Optional, Protocol, Self, Union, TypeVar
 import os
+
+__all__ = [
+    "Check",
+    "CustomCheck",
+    "AllCheck",
+    "AnyCheck",
+    "AndCheck",
+    "OrCheck",
+    "InvertedCheck",
+    "DelayedCheck",
+    "RepeatingAndCheck",
+    "RepeatingOrCheck",
+    "IsTrueBeforeDeadlineCheck",
+    "IsTrueBeforeTimeoutCheck",
+    "WaitForTrueCheck",
+    "RaisesCheck",
+    "FileExistsCheck",
+    "DirectoryExistsCheck",
+    "FileContainsCheck",
+    "IsEqualCheck",
+    "IsNotEqualCheck",
+    "IsGreaterThanCheck",
+    "IsLessThanCheck",
+    "IsInCheck",
+    "IsInstanceOfCheck",
+    "is_equal",
+    "is_not_equal",
+    "is_greater_than",
+    "is_less_than",
+    "is_in",
+    "is_instance_of",
+    "file_exists",
+    "dir_exists",
+    "file_contains",
+]
+
 
 type Condition = Callable[[], bool]
 
 
+class RichComparable(Protocol):
+    def __lt__(self, other: Any) -> bool: ...
+    def __gt__(self, other: Any) -> bool: ...
+    def __eq__(self, other: Any) -> bool: ...
+    def __contains__(self, key: Any) -> bool: ...
+
+
+T = TypeVar("T", bound=RichComparable)
+
+
+# --- Base Check Class ---
+
+
 class Check(ABC):
-    def __init__(self, condition: Condition) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self._condition: Condition = condition
-        self._on_success_callback: Optional[Callable[[], None]] = None
-        self._on_failure_callback: Optional[Callable[[], None]] = None
 
+    @abstractmethod
     def check(self) -> bool:
-        result = self._condition()
-        if result:
-            if self._on_success_callback:
-                self._on_success_callback()
-        else:
-            if self._on_failure_callback:
-                self._on_failure_callback()
-        return result
+        pass
 
-    def on_success(self, callback: Callable[[], None]) -> "Check":
-        """Registers a callback to be executed when the check succeeds."""
-        self._on_success_callback = callback
-        return self
+    # --- Callbacks ---
 
-    def on_failure(self, callback: Callable[[], None]) -> "Check":
-        """Registers a callback to be executed when the check fails."""
-        self._on_failure_callback = callback
-        return self
+    def on_success(self, callback: Callable[[], None]) -> "WithSuccessCallbackCheck":
+        return WithSuccessCallbackCheck(self, callback)
 
-    def with_delay(self, delay: float) -> "DelayedCheck":
-        return DelayedCheck(self, delay)
+    def on_failure(self, callback: Callable[[], None]) -> "WithFailureCallbackCheck":
+        return WithFailureCallbackCheck(self, callback)
 
-    def succeeds_in_attempts(self, times: int) -> "RepeatingOrCheck":
-        return RepeatingOrCheck(self, times)
+    # --- Modifiers ---
 
-    def is_consistent_for(self, times: int) -> "RepeatingAndCheck":
+    def is_true_for_attempts(self, times: int) -> "RepeatingAndCheck":
         return RepeatingAndCheck(self, times)
 
-    def succeeds_within(self, timeout: float) -> "SucceedsWithinCheck":
-        return SucceedsWithinCheck(self, timeout)
+    def succeeds_within_attempts(self, times: int) -> "RepeatingOrCheck":
+        return RepeatingOrCheck(self, times)
 
-    def eventually(self, timeout: float) -> "SucceedsWithinCheck":
-        """Alias for succeeds_within for better readability."""
-        return self.succeeds_within(timeout)
+    def succeeds_before_deadline(
+        self, deadline: datetime.datetime
+    ) -> "IsTrueBeforeDeadlineCheck":
+        return IsTrueBeforeDeadlineCheck(self, deadline)
 
-    def fails_within(self, timeout: float) -> "FailsWithinCheck":
-        return FailsWithinCheck(self, timeout)
+    def succeeds_within_timeout(
+        self, timeout: datetime.timedelta
+    ) -> "IsTrueBeforeTimeoutCheck":
+        return IsTrueBeforeTimeoutCheck(self, timeout)
 
-    def sometimes(self) -> "LoopingOrCheck":
-        return LoopingOrCheck(self)
+    def eventually(self, timeout: datetime.timedelta) -> "IsTrueBeforeTimeoutCheck":
+        return self.succeeds_within_timeout(timeout)
 
-    def always(self) -> "LoopingAndCheck":
-        return LoopingAndCheck(self)
-
-    def as_waiting(self, timeout: float) -> "WaitingCheck":
-        return WaitingCheck(self, timeout)
-
-    def with_deadline(self, deadline: datetime.datetime) -> "DeadlineCheck":
-        return DeadlineCheck(self, deadline)
-
-    def with_timeout(self, timeout: float) -> "TimeoutCheck":
-        return TimeoutCheck(self, timeout)
+    def wait_until_true(self) -> "WaitForTrueCheck":
+        return WaitForTrueCheck(self)
 
     def raises(self, exception: type[Exception]) -> "RaisesCheck":
         return RaisesCheck(self, exception)
+
+    def with_delay(self, delay: datetime.timedelta) -> "DelayedCheck":
+        return DelayedCheck(self, delay)
+
+    def invert(self) -> "InvertedCheck":
+        return InvertedCheck(self)
+
+    def as_background(self) -> "BackgroundCheck":
+        return BackgroundCheck(self)
+
+    # --- Dunder Methods ---
 
     def __and__(self, other: "Check") -> "AndCheck":
         return AndCheck(self, other)
@@ -90,69 +129,120 @@ class Check(ABC):
         return self.check()
 
     def __repr__(self) -> str:
-        return f"Check({self._condition.__name__})"
+        return f"<{self.__class__.__name__}>"
+
+
+class CustomCheck(Check):
+    def __init__(self, check: Condition) -> None:
+        super().__init__()
+        self._condition = check
+
+    def check(self) -> bool:
+        return self._condition()
+
+
+# --- Logical Checks ---
 
 
 class AllCheck(Check):
     def __init__(self, *checks: Check) -> None:
-        super().__init__(condition=lambda: all(checks))
+        super().__init__()
         self._checks: tuple[Check, ...] = checks
 
-    def __repr__(self) -> str:
-        return " and ".join([check.__repr__() for check in self._checks])
+    def check(self) -> bool:
+        return all(self._checks)
 
 
 class AnyCheck(Check):
     def __init__(self, *checks: Check) -> None:
-        super().__init__(condition=lambda: any(checks))
+        super().__init__()
         self._checks: tuple[Check, ...] = checks
 
-    def __repr__(self) -> str:
-        return " or ".join([check.__repr__() for check in self._checks])
+    def check(self) -> bool:
+        return any(self._checks)
 
 
-class AndCheck(AllCheck):
+class AndCheck(Check):
     def __init__(self, left: Check, right: Check) -> None:
-        super().__init__(*[left, right])
+        super().__init__()
         self._left: Check = left
         self._right: Check = right
 
-    def __repr__(self) -> str:
-        return f"{self._left.__repr__()} and {self._right.__repr__()}"
+    def check(self) -> bool:
+        return self._left.check() and self._right.check()
 
 
-class OrCheck(AnyCheck):
+class OrCheck(Check):
     def __init__(self, left: Check, right: Check) -> None:
-        super().__init__(*[left, right])
+        super().__init__()
         self._left: Check = left
         self._right: Check = right
 
-    def __repr__(self) -> str:
-        return f"{self._left.__repr__()} or {self._right.__repr__()}"
+    def check(self) -> bool:
+        return self._left.check() or self._right.check()
 
 
 class InvertedCheck(Check):
     def __init__(self, check: Check) -> None:
-        super().__init__(condition=lambda: not check)
-        self._inverted: Check = check
+        super().__init__()
+        self._check: Check = check
 
-    def __repr__(self) -> str:
-        return f"not {self._inverted.__repr__()}"
+    def check(self) -> bool:
+        return not self._check.check()
+
+
+class WithSuccessCallbackCheck(Check):
+    def __init__(self, check: Check, callback: Callable[[], None]) -> None:
+        super().__init__()
+        self._check = check
+        self._callback = callback
+
+    def check(self) -> bool:
+        result = self._check.check()
+        if result:
+            self._callback()
+        return result
+
+
+class WithFailureCallbackCheck(Check):
+    def __init__(self, check: Check, callback: Callable[[], None]) -> None:
+        super().__init__()
+        self._check = check
+        self._callback = callback
+
+    def check(self) -> bool:
+        result = self._check.check()
+        if not result:
+            self._callback()
+        return result
+
+
+# --- Timing and Repetition Checks ---
+
+
+class DeadlineExceededCheck(Check):
+    def __init__(self, deadline: datetime.datetime) -> None:
+        super().__init__()
+        self._deadline: datetime.datetime = deadline
+
+    def check(self) -> bool:
+        return datetime.datetime.now() > self._deadline
+
+
+class TimeoutExceededCheck(DeadlineExceededCheck):
+    def __init__(self, timeout: datetime.timedelta) -> None:
+        super().__init__(datetime.datetime.now() + timeout)
 
 
 class DelayedCheck(Check):
-    def __init__(self, check: Check, delay: float) -> None:
-        super().__init__(condition=lambda: check.check())
+    def __init__(self, check: Check, delay: datetime.timedelta) -> None:
+        super().__init__()
         self._check: Check = check
-        self._delay: float = delay
+        self._delay: datetime.timedelta = delay
 
-    @override
     def check(self) -> bool:
-        time.sleep(self._delay)
-        return self._condition()
-
-    def __repr__(self) -> str:
-        return f"DelayedCheck({self._check.__repr__()}, {self._delay})"
+        time.sleep(self._delay.total_seconds())
+        return self._check.check()
 
 
 class RepeatingAndCheck(AllCheck):
@@ -161,9 +251,6 @@ class RepeatingAndCheck(AllCheck):
         self._check: Check = check
         self._times: int = times
 
-    def __repr__(self) -> str:
-        return f"RepeatingAndCheck({self._check.__repr__()}, {self._times})"
-
 
 class RepeatingOrCheck(AnyCheck):
     def __init__(self, check: Check, times: int) -> None:
@@ -171,279 +258,299 @@ class RepeatingOrCheck(AnyCheck):
         self._check: Check = check
         self._times: int = times
 
-    def __repr__(self) -> str:
-        return f"RepeatingOrCheck({self._check.__repr__()}, {self._times})"
+
+class CheckedLessTimesThanCheck(Check):
+    def __init__(self, times) -> None:
+        super().__init__()
+        self._times_checked = 0
+        self._max_times = times
+
+    def times_checked(self) -> int:
+        return self._times_checked
+
+    def check(self) -> bool:
+        self._times_checked += 1
+        return self.times_checked() < self._max_times
 
 
-class LoopingCheck(Check):
-    def __init__(self, check: Check, initial_result: bool) -> None:
-        super().__init__(self.check)
+class CheckedMoreTimesThanCheck(Check):
+    def __init__(self, times) -> None:
+        super().__init__()
+        self._times_checked: int = 0
+        self._max_times: int = times
+
+    def times_checked(self) -> int:
+        return self._times_checked
+
+    def check(self) -> bool:
+        self._times_checked += 1
+        return self.times_checked() > self._max_times
+
+
+class BackgroundCheck(Check):
+    def __init__(self, check: Check) -> None:
+        super().__init__()
         self._check: Check = check
-        self._result = initial_result
-        self._stop_event = Event()
+        self._result: Optional[bool] = None
+        self._exception: Optional[Exception] = None
         self._thread: Optional[Thread] = None
 
-    def _loop(self) -> None:
-        while not self._stop_event.is_set():
-            self._result = self._check.check()
-            time.sleep(0.025)
+    def is_finished(self) -> Check:
+        return CustomCheck(
+            lambda: self._thread is not None and not self._thread.is_alive()
+        )
 
-    def _start_thread_if_needed(self) -> None:
+    def _run(self) -> None:
+        try:
+            self._result = self._check.check()
+        except Exception as e:
+            self._exception = e
+
+    def start(self) -> Self:
         if self._thread is None:
-            self._stop_event.clear()
-            self._thread = Thread(target=self._loop)
-            self._thread.daemon = True
+            self._thread = Thread(target=self._run, daemon=True)
             self._thread.start()
+        return self
+
+    def _cleanup(self) -> Self:
+        if self._thread is not None and not self._thread.is_alive():
+            self.stop()
+        return self
 
     def stop(self) -> None:
-        """Stops the background looping thread if it is running."""
-        if self._thread and self._thread.is_alive():
-            self._stop_event.set()
+        if self._thread is not None:
             self._thread.join()
-        self._thread = None
+            self._thread = None
 
-    def __del__(self) -> None:
-        self.stop()
+    def __enter__(self) -> Self:
+        self.start()
+        return self
 
-    @override
-    def check(self) -> bool:
-        self._start_thread_if_needed()
+    def __exit__(self, type, value, traceback) -> None:
+        pass
+
+    def result(self) -> Optional[bool]:
+        if self._exception:
+            raise self._exception
         return self._result
 
-    def __repr__(self) -> str:
-        return f"LoopingCheck({self._check.__repr__()})"
-
-
-class LoopingAndCheck(LoopingCheck):
-    def __init__(self, check: Check) -> None:
-        super().__init__(check, initial_result=True)
-
-    @override
-    def _loop(self) -> None:
-        while not self._stop_event.is_set():
-            if not self._check.check():
-                self._result = False
-            time.sleep(0.025)
-
-    def __repr__(self) -> str:
-        return f"LoopingAndCheck({self._check.__repr__()})"
-
-
-class LoopingOrCheck(LoopingCheck):
-    def __init__(self, check: Check) -> None:
-        super().__init__(check, initial_result=False)
-
-    @override
-    def _loop(self) -> None:
-        while not self._stop_event.is_set():
-            if self._check.check():
-                self._result = True
-            time.sleep(0.025)
-
-    def __repr__(self) -> str:
-        return f"LoopingOrCheck({self._check.__repr__()})"
-
-
-class DeadlineException(Exception):
-    def __init__(self, deadline: datetime.datetime) -> None:
-        super().__init__(
-            f"Polling did not complete by {deadline.strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-
-
-class DeadlineCheck(LoopingCheck):
-    def __init__(self, check: Check, deadline: datetime.datetime) -> None:
-        super().__init__(check, False)
-        self._check: Check = check
-        self._deadline: datetime.datetime = deadline
-
-    @override
     def check(self) -> bool:
-        while not super().check():
-            if datetime.datetime.now() > self._deadline:
-                raise DeadlineException(deadline=self._deadline)
-            time.sleep(0.025)
-        return True
-
-    def __repr__(self) -> str:
-        return f"DeadlineCheck({self._check.__repr__()}, {self._deadline})"
+        self.start()
+        self.stop()
+        return self.result() is True
 
 
-class TimeoutException(Exception):
-    def __init__(self, _timeout: float) -> None:
-        super().__init__(f"Polling did not complete in {_timeout} seconds")
+class FinishesBeforeDeadlineCheck(Check):
+    def __init__(self, check: Check, deadline: datetime.datetime):
+        super().__init__()
+        self._check = check
+        self._deadline = deadline
 
-
-class TimeoutCheck(DeadlineCheck):
-    def __init__(self, check: Check, timeout: float) -> None:
-        super().__init__(
-            check,
-            datetime.datetime.now() + datetime.timedelta(seconds=timeout),
-        )
-        self._timeout: float = timeout
-
-    @override
     def check(self) -> bool:
-        try:
-            return super().check()
-        except DeadlineException:
-            raise TimeoutException(self._timeout)
-
-    def __repr__(self) -> str:
-        return f"TimeoutCheck({self._check.__repr__()}, {self._timeout})"
+        background_check = self._check.as_background().start()
+        (
+            DeadlineExceededCheck(self._deadline) | background_check.is_finished()
+        ).wait_until_true().check()
+        return background_check.is_finished().check()
 
 
-class WaitingCheck(TimeoutCheck):
-    def __init__(self, check: Check, timeout: float) -> None:
-        super().__init__(check, timeout)
-        self._check: Check = check
+class FinishesBeforeTimeoutCheck(Check):
+    def __init__(self, check: Check, timeout: datetime.timedelta):
+        super().__init__()
+        self._check = check
         self._timeout = timeout
 
-    @override
     def check(self) -> bool:
-        try:
-            return super().check()
-        except TimeoutException:
-            return False
+        return FinishesBeforeDeadlineCheck(
+            self._check, datetime.datetime.now() + self._timeout
+        ).check()
 
-    def __repr__(self) -> str:
-        return f"WaitingCheck({self._check.__repr__()})"
+
+class IsTrueBeforeDeadlineCheck(Check):
+    def __init__(self, check: Check, deadline: datetime.datetime) -> None:
+        super().__init__()
+        self._check = check
+        self._deadline = deadline
+
+    def check(self) -> bool:
+        background_check = self._check.as_background().start()
+        (
+            DeadlineExceededCheck(self._deadline) | background_check.is_finished()
+        ).wait_until_true().check()
+        return background_check.result() is True
+
+
+class IsTrueBeforeTimeoutCheck(Check):
+    def __init__(self, check: Check, timeout: datetime.timedelta) -> None:
+        super().__init__()
+        self._check = check
+        self._timeout = timeout
+
+    def check(self) -> bool:
+        return IsTrueBeforeDeadlineCheck(
+            self._check, datetime.datetime.now() + self._timeout
+        ).check()
+
+
+class WaitForTrueCheck(Check):
+    def __init__(self, check: Check) -> None:
+        super().__init__()
+        self._check = check
+
+    def check(self) -> bool:
+        while not self._check.check():
+            time.sleep(0.025)
+        return True
 
 
 class RaisesCheck(Check):
     def __init__(self, check: Check, exception: type[Exception]) -> None:
-        def condition() -> bool:
-            try:
-                check.check()
-                return False
-            except exception:
-                return True
-
-        super().__init__(condition)
+        super().__init__()
         self._check: Check = check
         self._exception: type[Exception] = exception
 
-    def __repr__(self) -> str:
-        return f"RaisesCheck({self._check.__repr__()}, {self._exception.__name__})"
+    def check(self) -> bool:
+        try:
+            self._check.check()
+            return False
+        except self._exception:
+            return True
 
 
-class SucceedsWithinCheck(WaitingCheck):
-    def __init__(self, check: Check, timeout: float) -> None:
-        super().__init__(check, timeout)
-
-    def __repr__(self) -> str:
-        return f"SucceedsWithin({self._check.__repr__()}, {self._timeout})"
-
-
-class FailsWithinCheck(SucceedsWithinCheck):
-    def __init__(self, check: Check, timeout: float) -> None:
-        super().__init__(~check, timeout)
-
-    def __repr__(self) -> str:
-        return f"SucceedsWithin({self._check.__repr__()}, {self._timeout})"
+# --- Filesystem Checks ---
 
 
 class FileExistsCheck(Check):
-    def __init__(self, path: str) -> None:
-        super().__init__(lambda: os.path.exists(path))
+    def __init__(self, path: Path) -> None:
+        super().__init__()
         self._path = path
 
-    def __repr__(self) -> str:
-        return f"FileExists({self._path})"
+    def check(self) -> bool:
+        return os.path.exists(self._path)
 
 
 class DirectoryExistsCheck(Check):
-    def __init__(self, path: str) -> None:
-        super().__init__(lambda: os.path.isdir(path))
+    def __init__(self, path: Path) -> None:
+        super().__init__()
         self._path = path
 
-    def __repr__(self) -> str:
-        return f"DirectoryExists({self._path})"
+    def check(self) -> bool:
+        return os.path.isdir(self._path)
 
 
 class FileContainsCheck(Check):
-    def __init__(self, path: str, content: str) -> None:
-        def condition() -> bool:
-            if not os.path.exists(path):
-                return False
-            with open(path, "r") as f:
-                return content in f.read()
-
-        super().__init__(condition)
+    def __init__(self, path: Path, content: bytes) -> None:
+        super().__init__()
         self._path = path
         self._content = content
 
-    def __repr__(self) -> str:
-        return f"FileContains({self._path}, {self._content})"
+    def check(self) -> bool:
+        try:
+            with open(self._path, "rb") as f:
+                return self._content in f.read()
+        except FileNotFoundError:
+            return False
 
 
-class RichComparable(Protocol):
-    def __lt__(self, other: Any) -> bool: ...
-    def __gt__(self, other: Any) -> bool: ...
-    def __eq__(self, other: Any) -> bool: ...
-    def __contains__(self, key: Any) -> bool: ...
-
-
-T = TypeVar("T", bound=RichComparable)
-
-
+# --- Comparison Checks ---
 class IsEqualCheck(Check, Generic[T]):
-    def __init__(self, left_value: T, right_value: T) -> None:
-        super().__init__(lambda: left_value == right_value)
-        self._left_value = left_value
-        self._right_value = right_value
+    def __init__(self, lhs: T, rhs: T) -> None:
+        super().__init__()
+        self._lhs = lhs
+        self._rhs = rhs
 
-    def __repr__(self) -> str:
-        return f"{self._left_value.__repr__()} == {self._right_value.__repr__()} "
+    def check(self) -> bool:
+        return self._lhs == self._rhs
 
 
 class IsNotEqualCheck(Check, Generic[T]):
-    def __init__(self, left_value: T, right_value: T) -> None:
-        super().__init__(lambda: left_value != right_value)
-        self._left_value = left_value
-        self._right_value = right_value
+    def __init__(self, lhs: T, rhs: T) -> None:
+        super().__init__()
+        self._lhs = lhs
+        self._rhs = rhs
 
-    def __repr__(self) -> str:
-        return f"{self._left_value.__repr__()} != {self._right_value.__repr__()} "
+    def check(self) -> bool:
+        return self._lhs != self._rhs
 
 
 class IsGreaterThanCheck(Check, Generic[T]):
-    def __init__(self, left_value: T, right_value: T) -> None:
-        super().__init__(lambda: left_value > right_value)
-        self._left_value = left_value
-        self._right_value = right_value
+    def __init__(self, lhs: T, rhs: T) -> None:
+        super().__init__()
+        self._lhs = lhs
+        self._rhs = rhs
 
-    def __repr__(self) -> str:
-        return f"{self._left_value.__repr__()} > {self._right_value.__repr__()} "
+    def check(self) -> bool:
+        return self._lhs > self._rhs
 
 
 class IsLessThanCheck(Check, Generic[T]):
-    def __init__(self, left_value: T, right_value: T) -> None:
-        super().__init__(lambda: left_value < right_value)
-        self._left_value = left_value
-        self._right_value = right_value
+    def __init__(self, lhs: T, rhs: T) -> None:
+        super().__init__()
+        self._lhs = lhs
+        self._rhs = rhs
 
-    def __repr__(self) -> str:
-        return f"{self._left_value.__repr__()} < {self._right_value.__repr__()} "
+    def check(self) -> bool:
+        return self._lhs < self._rhs
 
 
 class IsInCheck(Check, Generic[T]):
-    def __init__(self, member: T, container: T) -> None:
-        super().__init__(lambda: member in container)
-        self._member = member
-        self._container = container
+    def __init__(self, needle: T, haystack: T) -> None:
+        super().__init__()
+        self._needle = needle
+        self._haystack = haystack
 
-    def __repr__(self) -> str:
-        return f"{self._member.__repr__()} in {self._container.__repr__()}"
+    def check(self) -> bool:
+        return self._needle in self._haystack
 
 
 class IsInstanceOfCheck(Check):
     def __init__(
         self, obj: object, class_or_tuple: Union[type, tuple[type, ...]]
     ) -> None:
-        super().__init__(lambda: isinstance(obj, class_or_tuple))
+        super().__init__()
         self._obj = obj
         self._class_or_tuple = class_or_tuple
 
-    def __repr__(self) -> str:
-        return f"isinstance({self._obj.__repr__()}, {self._class_or_tuple.__repr__()})"
+    def check(self) -> bool:
+        return isinstance(self._obj, self._class_or_tuple)
+
+
+# --- Factory Functions ---
+
+
+def is_equal(lhs: T, rhs: T) -> IsEqualCheck[T]:
+    return IsEqualCheck(lhs, rhs)
+
+
+def is_not_equal(lhs: T, rhs: T) -> IsNotEqualCheck[T]:
+    return IsNotEqualCheck(lhs, rhs)
+
+
+def is_greater_than(lhs: T, rhs: T) -> IsGreaterThanCheck[T]:
+    return IsGreaterThanCheck(lhs, rhs)
+
+
+def is_less_than(lhs: T, rhs: T) -> IsLessThanCheck[T]:
+    return IsLessThanCheck(lhs, rhs)
+
+
+def is_in(needle: T, haystack: T) -> IsInCheck[T]:
+    return IsInCheck(needle, haystack)
+
+
+def is_instance_of(
+    obj: object, class_or_tuple: Union[type, tuple[type, ...]]
+) -> IsInstanceOfCheck:
+    return IsInstanceOfCheck(obj, class_or_tuple)
+
+
+def file_exists(path: Path) -> FileExistsCheck:
+    return FileExistsCheck(path)
+
+
+def dir_exists(path: Path) -> DirectoryExistsCheck:
+    return DirectoryExistsCheck(path)
+
+
+def file_contains(path: Path, content: bytes) -> FileContainsCheck:
+    return FileContainsCheck(path, content)
