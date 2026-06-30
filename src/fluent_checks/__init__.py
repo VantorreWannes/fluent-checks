@@ -1,11 +1,11 @@
-from abc import ABC, abstractmethod
 import datetime
+import os
+import time
+from abc import ABC, abstractmethod
 from itertools import repeat
 from pathlib import Path
 from threading import Thread
-import time
-from typing import Any, Callable, Generic, Optional, Protocol, Self, Union, TypeVar
-import os
+from typing import Any, Callable, Generic, Optional, Protocol, Self, TypeVar, Union
 
 __all__ = [
     "Check",
@@ -77,26 +77,22 @@ class Check(ABC):
 
     # --- Modifiers ---
 
-    def is_true_for_attempts(self, times: int) -> "RepeatingAndCheck":
+    def all_attempts(self, times: int) -> "RepeatingAndCheck":
         return RepeatingAndCheck(self, times)
 
-    def succeeds_within_attempts(self, times: int) -> "RepeatingOrCheck":
+    def any_attempt(self, times: int) -> "RepeatingOrCheck":
         return RepeatingOrCheck(self, times)
 
-    def succeeds_before_deadline(
-        self, deadline: datetime.datetime
-    ) -> "IsTrueBeforeDeadlineCheck":
+    def before(self, deadline: datetime.datetime) -> "IsTrueBeforeDeadlineCheck":
         return IsTrueBeforeDeadlineCheck(self, deadline)
 
-    def succeeds_within_timeout(
-        self, timeout: datetime.timedelta
-    ) -> "IsTrueBeforeTimeoutCheck":
+    def within(self, timeout: datetime.timedelta) -> "IsTrueBeforeTimeoutCheck":
         return IsTrueBeforeTimeoutCheck(self, timeout)
 
     def eventually(self, timeout: datetime.timedelta) -> "IsTrueBeforeTimeoutCheck":
-        return self.succeeds_within_timeout(timeout)
+        return self.within(timeout)
 
-    def wait_until_true(self) -> "WaitForTrueCheck":
+    def wait(self) -> "WaitForTrueCheck":
         return WaitForTrueCheck(self)
 
     def raises(self, exception: type[Exception]) -> "RaisesCheck":
@@ -108,7 +104,7 @@ class Check(ABC):
     def invert(self) -> "InvertedCheck":
         return InvertedCheck(self)
 
-    def as_background(self) -> "BackgroundCheck":
+    def background(self) -> "BackgroundCheck":
         return BackgroundCheck(self)
 
     # --- Dunder Methods ---
@@ -347,10 +343,10 @@ class FinishesBeforeDeadlineCheck(Check):
         self._deadline = deadline
 
     def check(self) -> bool:
-        background_check = self._check.as_background().start()
+        background_check = self._check.background().start()
         (
             DeadlineExceededCheck(self._deadline) | background_check.is_finished()
-        ).wait_until_true().check()
+        ).wait().check()
         return background_check.is_finished().check()
 
 
@@ -373,10 +369,10 @@ class IsTrueBeforeDeadlineCheck(Check):
         self._deadline = deadline
 
     def check(self) -> bool:
-        background_check = self._check.as_background().start()
+        background_check = self._check.background().start()
         (
             DeadlineExceededCheck(self._deadline) | background_check.is_finished()
-        ).wait_until_true().check()
+        ).wait().check()
         return background_check.result() is True
 
 

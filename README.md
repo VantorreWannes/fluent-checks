@@ -55,17 +55,17 @@ start_time = time.time()
 wait_check = CustomCheck(lambda: time.time() - start_time > 1)
 
 # Block indefinitely until a check passes
-wait_check.wait_until_true()
+wait_check.wait()
 assert wait_check.check() is True
 
 # Check if something becomes true within a timeout
 passing_check = CustomCheck(lambda: True).with_delay(timedelta(seconds=1))
-assert passing_check.succeeds_within_timeout(timedelta(seconds=2)) is True
+assert passing_check.within(timedelta(seconds=2)) is True
 
 failing_check = CustomCheck(lambda: True).with_delay(timedelta(seconds=2))
-assert failing_check.succeeds_within_timeout(timedelta(seconds=1)) is False
+assert failing_check.within(timedelta(seconds=1)) is False
 
-# `eventually` is a convenient alias for succeeds_within_timeout
+# `eventually` is a convenient alias for `within`
 assert passing_check.eventually(timedelta(seconds=2)) is True
 ```
 
@@ -76,13 +76,13 @@ You can verify that a condition holds true multiple times.
 import random
 from fluent_checks import CustomCheck
 
-# succeeds_within_attempts: True if the check passes at least once in 10 attempts
+# any_attempt: True if the check passes at least once in 10 attempts
 flaky_check = CustomCheck(lambda: random.random() > 0.8)
-flaky_check.succeeds_within_attempts(10)
+flaky_check.any_attempt(10)
 
-# is_true_for_attempts: True if the check passes 5 times in a row
+# all_attempts: True if the check passes 5 times in a row
 stable_check = CustomCheck(lambda: True)
-assert stable_check.is_true_for_attempts(5)
+assert stable_check.all_attempts(5)
 ```
 
 ### Background Checks
@@ -94,7 +94,7 @@ from fluent_checks import CustomCheck
 
 # Run a long-running check in the background
 long_check = CustomCheck(lambda: True).with_delay(timedelta(seconds=1))
-background_check = long_check.as_background()
+background_check = long_check.background()
 
 # You can start it and check on it later
 background_check.start()
@@ -182,15 +182,15 @@ assert is_instance_of(1, int)
 | **`&`, `\|`, `~`** | Operators for AND, OR, and NOT logic. |
 | **`.on_success(callback)`** | Registers a callback to be executed when the check succeeds. |
 | **`.on_failure(callback)`** | Registers a callback to be executed when the check fails. |
-| **`.is_true_for_attempts(times)`** | Checks if the condition is met consecutively for a number of tries. |
-| **`.succeeds_within_attempts(times)`** | Checks if the condition is met at least once within a number of tries. |
-| **`.succeeds_before_deadline(deadline)`**| Checks if the condition becomes true before a specific datetime. |
-| **`.succeeds_within_timeout(timeout)`** | Checks if the condition becomes true within a certain timedelta. |
-| **`.eventually(timeout)`** | An alias for `succeeds_within_timeout`. |
-| **`.wait_until_true()`** | Blocks indefinitely until the check returns `True`. |
+| **`.all_attempts(times)`** | Checks if the condition is met consecutively for a number of tries. |
+| **`.any_attempt(times)`** | Checks if the condition is met at least once within a number of tries. |
+| **`.before(deadline)`** | Checks if the condition becomes true before a specific datetime. |
+| **`.within(timeout)`** | Checks if the condition becomes true within a certain timedelta. |
+| **`.eventually(timeout)`** | An alias for `within`. |
+| **`.wait()`** | Blocks indefinitely until the check returns `True`. |
 | **`.raises(exception)`** | Checks if the condition raises a specific exception. |
 | **`.with_delay(delay)`** | Returns a new check that waits for a delay before executing. |
-| **`.as_background()`** | Returns a `BackgroundCheck` wrapper to run the check in a thread. |
+| **`.background()`** | Returns a `BackgroundCheck` wrapper to run the check in a thread. |
 
 
 ### Filesystem Functions
