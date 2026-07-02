@@ -1,559 +1,366 @@
-from pathlib import Path
-from typing import Generic, TypeVar
-import pytest
+"""Behaviour-based tests for the refactored fluent_checks.
+
+Since named subclasses are gone, tests assert *behaviour* (results,
+short-circuiting, call counts, timing) instead of `isinstance(...)`.
+"""
+
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
+
+import pytest
+
 from fluent_checks import (
-    AndCheck,
-    BackgroundCheck,
     Check,
-    CheckedLessTimesThanCheck,
-    CheckedMoreTimesThanCheck,
-    CustomCheck,
-    AllCheck,
-    AnyCheck,
-    DeadlineExceededCheck,
-    DelayedCheck,
-    DirectoryExistsCheck,
-    FileContainsCheck,
-    FileExistsCheck,
-    FinishesBeforeDeadlineCheck,
-    FinishesBeforeTimeoutCheck,
-    InvertedCheck,
-    IsTrueBeforeTimeoutCheck,
-    OrCheck,
-    RaisesCheck,
-    RepeatingAndCheck,
-    RepeatingOrCheck,
-    TimeoutExceededCheck,
-    WaitForTrueCheck,
-    WithFailureCallbackCheck,
-    WithSuccessCallbackCheck,
+    all_of,
+    always,
+    any_of,
+    deadline_exceeded,
+    dir_exists,
+    file_contains,
+    file_exists,
     is_equal,
     is_greater_than,
     is_in,
     is_instance_of,
     is_less_than,
     is_not_equal,
+    timeout_exceeded,
 )
 
-# --- Helpers ---
-
-FAILING_CHECK = CustomCheck(
-    lambda: pytest.fail("This check should not have been evaluated")
-)
+# --- helpers -----------------------------------------------------------
 
 
-def crash_check():
-    """A check that fails if evaluated."""
-    return
+class Counter:
+    """Counts evaluations; optionally becomes true from the nth call on."""
+
+    def __init__(self, true_after: int | None = None) -> None:
+        self.calls = 0
+        self._true_after = true_after
+
+    def as_check(self) -> Check:
+        def condition() -> bool:
+            self.calls += 1
+            return self._true_after is not None and self.calls >= self._true_after
+
+        return Check(condition, "counter")
 
 
-def missing_file(tmp_path_factory: pytest.TempPathFactory):
-    return tmp_path_factory.mktemp("empty_folder") / "missing.txt"
+def never_evaluated() -> Check:
+    return Check(lambda: pytest.fail("this check should not have been evaluated"))
 
 
-def file(tmp_path: Path):
-    file_path = tmp_path / "exists.txt"
-    with open(file_path, "w") as f:
-        f.write("hello fluent checks")
-    return tmp_path
+def raising(error: Exception) -> Check:
+    def condition() -> bool:
+        raise error
+
+    return Check(condition, "raising")
 
 
-def dir(tmp_path: Path):
-    return tmp_path
+# --- core --------------------------------------------------------------
 
 
-T = TypeVar("T")
-
-
-class State(Generic[T]):
-    def __init__(self, value: T):
-        self._value = value
-
-    def set_value(self, value: T):
-        self._value = value
-
-    def value(self) -> T:
-        return self._value
-
-
-class TestCustomCheck:
+class TestCore:
     def test_check(self):
-        assert CustomCheck(lambda: True).check()
+        assert always(True).check() is True
+        assert always(False).check() is False
 
     def test_implicit_bool(self):
-        assert CustomCheck(lambda: True)
+        assert always(True)
+        assert not always(False)
+
+    def test_repr_composes(self):
+        composed = (always(True) & ~always(False)).named("everything is fine")
+        assert repr(composed) == "<Check: everything is fine>"
+
+    def test_lazy(self):
+        never_evaluated()  # constructing must not evaluate
 
 
-class TestAllCheck:
+# --- logic -------------------------------------------------------------
+
+
+class TestLogic:
     @pytest.mark.parametrize(
-        "checks, expected",
+        "left, right, expected",
         [
-            ([CustomCheck(lambda: True), CustomCheck(lambda: True)], True),
-            ([CustomCheck(lambda: False), CustomCheck(lambda: True)], False),
-            ([CustomCheck(lambda: True), CustomCheck(lambda: False)], False),
-            ([CustomCheck(lambda: False), CustomCheck(lambda: False)], False),
+            (True, True, True),
+            (True, False, False),
+            (False, True, False),
+            (False, False, False),
         ],
     )
-    def test_check(self, checks: list[Check], expected: bool):
-        assert AllCheck(*checks).check() == expected
-
-    def test_short_ciruiting(self):
-        false_check = CustomCheck(lambda: False)
-        failing_check = FAILING_CHECK
-        AllCheck(false_check, failing_check).check()
-
-
-class TestAnyCheck:
-    @pytest.mark.parametrize(
-        "checks, expected",
-        [
-            ([CustomCheck(lambda: True), CustomCheck(lambda: True)], True),
-            ([CustomCheck(lambda: False), CustomCheck(lambda: True)], True),
-            ([CustomCheck(lambda: True), CustomCheck(lambda: False)], True),
-            ([CustomCheck(lambda: False), CustomCheck(lambda: False)], False),
-        ],
-    )
-    def test_check(self, checks: list[Check], expected: bool):
-        assert AnyCheck(*checks).check() == expected
-
-    def test_short_ciruiting(self):
-        true_check = CustomCheck(lambda: True)
-        failing_check = FAILING_CHECK
-        AnyCheck(true_check, failing_check).check()
-
-
-class TestAndCheck:
-    @pytest.mark.parametrize(
-        "lhs, rhs, expected",
-        [
-            (CustomCheck(lambda: True), CustomCheck(lambda: True), True),
-            (CustomCheck(lambda: False), CustomCheck(lambda: True), False),
-            (CustomCheck(lambda: True), CustomCheck(lambda: False), False),
-            (CustomCheck(lambda: False), CustomCheck(lambda: False), False),
-        ],
-    )
-    def test_check(self, lhs: Check, rhs: Check, expected: bool):
-        assert AndCheck(lhs, rhs).check() == expected
+    def test_and(self, left, right, expected):
+        assert (always(left) & always(right)).check() == expected
 
     @pytest.mark.parametrize(
-        "lhs, rhs",
+        "left, right, expected",
         [
-            (CustomCheck(lambda: True), CustomCheck(lambda: True)),
-            (CustomCheck(lambda: False), CustomCheck(lambda: True)),
-            (CustomCheck(lambda: True), CustomCheck(lambda: False)),
-            (CustomCheck(lambda: False), CustomCheck(lambda: False)),
+            (True, True, True),
+            (True, False, True),
+            (False, True, True),
+            (False, False, False),
         ],
     )
-    def test_operator(self, lhs: Check, rhs: Check):
-        assert isinstance(lhs & rhs, AndCheck)
+    def test_or(self, left, right, expected):
+        assert (always(left) | always(right)).check() == expected
 
-    def test_short_ciruiting(self):
-        false_check = CustomCheck(lambda: False)
-        failing_check = FAILING_CHECK
-        AndCheck(false_check, failing_check).check()
+    @pytest.mark.parametrize("value, expected", [(True, False), (False, True)])
+    def test_invert(self, value, expected):
+        assert (~always(value)).check() == expected
 
+    def test_and_short_circuits(self):
+        assert not (always(False) & never_evaluated()).check()
 
-class TestOrCheck:
-    @pytest.mark.parametrize(
-        "lhs, rhs, expected",
-        [
-            (CustomCheck(lambda: True), CustomCheck(lambda: True), True),
-            (CustomCheck(lambda: False), CustomCheck(lambda: True), True),
-            (CustomCheck(lambda: True), CustomCheck(lambda: False), True),
-            (CustomCheck(lambda: False), CustomCheck(lambda: False), False),
-        ],
-    )
-    def test_check(self, lhs: Check, rhs: Check, expected: bool):
-        assert OrCheck(lhs, rhs).check() == expected
+    def test_or_short_circuits(self):
+        assert (always(True) | never_evaluated()).check()
 
     @pytest.mark.parametrize(
-        "lhs, rhs",
-        [
-            (CustomCheck(lambda: True), CustomCheck(lambda: True)),
-            (CustomCheck(lambda: False), CustomCheck(lambda: True)),
-            (CustomCheck(lambda: True), CustomCheck(lambda: False)),
-            (CustomCheck(lambda: False), CustomCheck(lambda: False)),
-        ],
+        "values, expected",
+        [((True, True), True), ((True, False), False), ((False, False), False)],
     )
-    def test_operator(self, lhs: Check, rhs: Check):
-        assert isinstance(lhs | rhs, OrCheck)
-
-    def test_short_ciruiting(self):
-        true_check = CustomCheck(lambda: True)
-        failing_check = FAILING_CHECK
-        OrCheck(true_check, failing_check).check()
-
-
-class TestInvertedCheck:
-    @pytest.mark.parametrize(
-        "check, expected",
-        [
-            (CustomCheck(lambda: True), False),
-            (CustomCheck(lambda: False), True),
-        ],
-    )
-    def test_check(self, check: Check, expected: bool):
-        assert InvertedCheck(check).check() == expected
+    def test_all_of(self, values, expected):
+        assert all_of(*map(always, values)).check() == expected
 
     @pytest.mark.parametrize(
-        "check",
-        [
-            (CustomCheck(lambda: True)),
-            (CustomCheck(lambda: False)),
-        ],
+        "values, expected",
+        [((True, True), True), ((False, True), True), ((False, False), False)],
     )
-    def test_operator(self, check: Check):
-        assert isinstance(~check, InvertedCheck)
+    def test_any_of(self, values, expected):
+        assert any_of(*map(always, values)).check() == expected
+
+    def test_all_of_short_circuits(self):
+        all_of(always(False), never_evaluated()).check()
+
+    def test_any_of_short_circuits(self):
+        any_of(always(True), never_evaluated()).check()
 
 
-class TestWithSuccessCallbackCheck:
-    @pytest.mark.parametrize(
-        "check, expected",
-        [
-            (CustomCheck(lambda: True), True),
-            (CustomCheck(lambda: False), False),
-        ],
-    )
-    def test_check(self, check: Check, expected: bool):
-        state = State[bool](False)
-
-        def callback():
-            return state.set_value(True)
-
-        WithSuccessCallbackCheck(check, callback).check()
-        assert state.value() == expected
+# --- callbacks ---------------------------------------------------------
 
 
-class TestWithFailureCallbackCheck:
-    @pytest.mark.parametrize(
-        "check, expected",
-        [
-            (CustomCheck(lambda: True), False),
-            (CustomCheck(lambda: False), True),
-        ],
-    )
-    def test_check(self, check: Check, expected: bool):
-        state = State[bool](False)
+class TestCallbacks:
+    @pytest.mark.parametrize("result, fired", [(True, True), (False, False)])
+    def test_on_success(self, result, fired):
+        events: list[str] = []
+        always(result).on_success(lambda: events.append("hit")).check()
+        assert bool(events) == fired
 
-        def callback():
-            return state.set_value(True)
+    @pytest.mark.parametrize("result, fired", [(True, False), (False, True)])
+    def test_on_failure(self, result, fired):
+        events: list[str] = []
+        always(result).on_failure(lambda: events.append("hit")).check()
+        assert bool(events) == fired
 
-        WithFailureCallbackCheck(check, callback).check()
-        assert state.value() == expected
-
-
-class TestDeadlineExceededCheck:
-    @pytest.mark.parametrize(
-        "deadline, exceeded",
-        [
-            (datetime.now() - timedelta(seconds=1), True),
-            (datetime.now() + timedelta(seconds=1), False),
-        ],
-    )
-    def test_check(self, deadline: datetime, exceeded: bool):
-        assert DeadlineExceededCheck(deadline).check() == exceeded
+    def test_tap_preserves_result(self):
+        assert always(True).tap(on_success=lambda: None).check() is True
+        assert always(False).tap(on_failure=lambda: None).check() is False
 
 
-class TestTimeoutExceededCheck:
-    @pytest.mark.parametrize(
-        "timeout, delay, exceeded",
-        [
-            (timedelta(milliseconds=10), timedelta(milliseconds=0), False),
-            (timedelta(milliseconds=0), timedelta(milliseconds=10), True),
-        ],
-    )
-    def test_check(self, timeout: timedelta, delay: timedelta, exceeded: bool):
-        timeout_exceeded_check = TimeoutExceededCheck(timeout)
-        time.sleep(delay.total_seconds())
-        assert timeout_exceeded_check.check() == exceeded
+# --- repetition --------------------------------------------------------
 
 
-class TestDelayedCheck:
-    @pytest.mark.parametrize(
-        "delay",
-        [
-            (timedelta(milliseconds=100)),
-            (timedelta(milliseconds=50)),
-        ],
-    )
-    def test_check(self, delay: timedelta):
-        inner_check = CustomCheck(lambda: True)
-        start_time = time.time()
-        DelayedCheck(inner_check, delay).check()
-        end_time = time.time()
-        assert end_time - start_time >= delay.total_seconds()
+class TestRepetition:
+    def test_all_attempts_passes_when_stable(self):
+        counter = Counter(true_after=1)
+        assert counter.as_check().all_attempts(5).check()
+        assert counter.calls == 5
+
+    def test_all_attempts_stops_at_first_failure(self):
+        counter = Counter(true_after=None)  # always false
+        assert not counter.as_check().all_attempts(5).check()
+        assert counter.calls == 1
+
+    def test_any_attempt_stops_at_first_success(self):
+        counter = Counter(true_after=3)
+        assert counter.as_check().any_attempt(10).check()
+        assert counter.calls == 3
+
+    def test_any_attempt_exhausts_on_failure(self):
+        counter = Counter(true_after=None)
+        assert not counter.as_check().any_attempt(4).check()
+        assert counter.calls == 4
 
 
-class TestRepeatingAndCheck:
-    @pytest.mark.parametrize(
-        "check, times, expected",
-        [
-            (CustomCheck(lambda: True), 10, True),
-            (CustomCheck(lambda: False), 10, False),
-        ],
-    )
-    def test_check(self, check: Check, times: int, expected: bool):
-        assert RepeatingAndCheck(check, times).check() == expected
+# --- timing ------------------------------------------------------------
 
 
-class TestRepeatingOrCheck:
-    @pytest.mark.parametrize(
-        "check, times, expected",
-        [
-            (CheckedMoreTimesThanCheck(1), 2, True),
-            (CheckedMoreTimesThanCheck(1), 1, False),
-            (CheckedMoreTimesThanCheck(1), 0, False),
-        ],
-    )
-    def test_check(self, check: Check, times: int, expected: bool):
-        assert RepeatingOrCheck(check, times).check() == expected
-
-
-class TestCheckedLessTimesThanCheck:
-    @pytest.mark.parametrize(
-        "check_amount, times, expected",
-        [
-            (1, 2, True),
-            (2, 2, False),
-            (2, 1, False),
-        ],
-    )
-    def test_check(self, check_amount: int, times: int, expected: bool):
-        check = CheckedLessTimesThanCheck(times)
-        for _ in range(check_amount - 1):
-            check.check()
-        assert check.check() == expected
-
-    def test_times_checked(self):
-        check = CheckedMoreTimesThanCheck(0)
-        assert check.times_checked() == 0
-
-
-class TestCheckedMoreTimesThanCheck:
-    @pytest.mark.parametrize(
-        "check_amount, times, expected",
-        [
-            (2, 1, True),
-            (2, 2, False),
-            (1, 2, False),
-        ],
-    )
-    def test_check(self, check_amount: int, times: int, expected: bool):
-        check = CheckedMoreTimesThanCheck(times)
-        for _ in range(check_amount - 1):
-            check.check()
-        assert check.check() == expected
-
-    def test_times_checked(self):
-        check = CheckedMoreTimesThanCheck(0)
-        assert check.times_checked() == 0
-
-
-class TestBackgroundCheck:
-    @pytest.mark.parametrize(
-        "delay",
-        [
-            (timedelta(milliseconds=100)),
-            (timedelta(milliseconds=50)),
-        ],
-    )
-    def test_is_finished(self, delay: timedelta):
-        true_check = CustomCheck(lambda: True)
-        delayed_check = true_check.with_delay(delay)
-        background_check = BackgroundCheck(delayed_check)
-        assert not background_check.is_finished()
-        background_check.start()
-        assert not background_check.is_finished()
-        time.sleep(delay.total_seconds() + 0.1)
-        assert background_check.is_finished()
+class TestTiming:
+    def test_with_delay(self):
+        delay = timedelta(milliseconds=50)
+        start = time.monotonic()
+        assert always(True).with_delay(delay).check()
+        assert time.monotonic() - start >= delay.total_seconds()
 
     @pytest.mark.parametrize(
-        "result, delay",
-        [
-            (True, timedelta(milliseconds=100)),
-            (True, timedelta(milliseconds=50)),
-            (False, timedelta(milliseconds=100)),
-            (False, timedelta(milliseconds=50)),
-        ],
+        "offset, exceeded",
+        [(timedelta(seconds=-1), True), (timedelta(seconds=1), False)],
     )
-    def test_result(self, result: bool, delay: timedelta):
-        true_check = CustomCheck(lambda: result)
-        delayed_check = true_check.with_delay(delay)
-        background_check = BackgroundCheck(delayed_check)
-        assert background_check.result() is None
-        background_check.start()
-        assert background_check.result() is None
-        time.sleep(delay.total_seconds() + 0.1)
-        assert background_check.result() == result
+    def test_deadline_exceeded(self, offset, exceeded):
+        assert deadline_exceeded(datetime.now() + offset).check() == exceeded
+
+    def test_timeout_exceeded_is_fixed_at_construction(self):
+        stopwatch = timeout_exceeded(timedelta(milliseconds=20))
+        assert not stopwatch.check()
+        time.sleep(0.03)
+        assert stopwatch.check()
+
+    def test_wait_polls_until_true(self):
+        counter = Counter(true_after=3)
+        assert counter.as_check().wait(poll_interval=timedelta(milliseconds=1)).check()
+        assert counter.calls == 3
 
     @pytest.mark.parametrize(
-        "delay",
+        "result, delay, timeout, expected",
         [
-            (timedelta(milliseconds=100)),
-            (timedelta(milliseconds=50)),
+            (True, timedelta(milliseconds=50), timedelta(milliseconds=200), True),
+            (False, timedelta(milliseconds=50), timedelta(milliseconds=200), False),
+            (True, timedelta(milliseconds=200), timedelta(milliseconds=50), False),
         ],
     )
-    def test_check(self, delay: timedelta):
-        true_check = TimeoutExceededCheck(delay - timedelta(milliseconds=10))
-        delayed_check = true_check.with_delay(delay)
-        background_check = BackgroundCheck(delayed_check)
-        assert background_check.check()
+    def test_within(self, result, delay, timeout, expected):
+        slow = always(result).with_delay(delay)
+        assert slow.within(timeout).check() == expected
 
+    def test_before(self):
+        slow = always(True).with_delay(timedelta(milliseconds=50))
+        assert slow.before(datetime.now() + timedelta(milliseconds=200)).check()
+        assert not slow.before(datetime.now() - timedelta(seconds=1)).check()
 
-class TestFinishesBeforeDeadlineCheck:
     @pytest.mark.parametrize(
-        "check_delay, timeout, expected",
+        "delay, timeout, expected",
         [
-            (timedelta(milliseconds=50), timedelta(milliseconds=100), True),
-            (timedelta(milliseconds=100), timedelta(milliseconds=50), False),
+            (timedelta(milliseconds=50), timedelta(milliseconds=200), True),
+            (timedelta(milliseconds=200), timedelta(milliseconds=50), False),
         ],
     )
-    def test_check(self, check_delay: timedelta, timeout: timedelta, expected: bool):
-        inner_check = CustomCheck(lambda: True).with_delay(check_delay)
-        deadline = datetime.now() + timeout
-        check = FinishesBeforeDeadlineCheck(inner_check, deadline)
-        assert check.check() == expected
+    def test_finishes_within(self, delay, timeout, expected):
+        slow = always(True).with_delay(delay)
+        assert slow.finishes_within(timeout).check() == expected
 
 
-class TestFinishesBeforeTimeoutCheck:
-    @pytest.mark.parametrize(
-        "check_delay, timeout, expected",
-        [
-            (timedelta(milliseconds=50), timedelta(milliseconds=100), True),
-            (timedelta(milliseconds=100), timedelta(milliseconds=50), False),
-        ],
-    )
-    def test_check(self, check_delay: timedelta, timeout: timedelta, expected: bool):
-        inner_check = CustomCheck(lambda: True).with_delay(check_delay)
-        check = FinishesBeforeTimeoutCheck(inner_check, timeout)
-        assert check.check() == expected
+# --- exceptions --------------------------------------------------------
 
 
-class TestIsTrueBeforeTimeoutCheck:
-    @pytest.mark.parametrize(
-        "check_result, check_delay, timeout, expected",
-        [
-            (True, timedelta(milliseconds=50), timedelta(milliseconds=100), True),
-            (False, timedelta(milliseconds=50), timedelta(milliseconds=100), False),
-            (True, timedelta(milliseconds=100), timedelta(milliseconds=50), False),
-        ],
-    )
-    def test_check(
-        self,
-        check_result: bool,
-        check_delay: timedelta,
-        timeout: timedelta,
-        expected: bool,
-    ):
-        inner_check = CustomCheck(lambda: check_result).with_delay(check_delay)
-        check = IsTrueBeforeTimeoutCheck(inner_check, timeout)
-        assert check.check() == expected
+class TestExceptions:
+    def test_raises_matching(self):
+        assert raising(ValueError("boom")).raises(ValueError).check()
 
+    def test_raises_nothing(self):
+        assert not always(True).raises(ValueError).check()
 
-class TestWaitForTrueCheck:
-    def test_check(self):
-        state = State(0)
-        check = CustomCheck(lambda: state.value() >= 3)
-
-        def increment_state():
-            state.set_value(state.value() + 1)
-
-        waiter = WaitForTrueCheck(check.on_failure(increment_state))
-        waiter.check()
-        assert state.value() == 3
-
-
-class TestRaisesCheck:
-    def test_check_raises_correct_exception(self):
-        def raise_value_error():
-            raise ValueError("Test")
-
-        check = CustomCheck(raise_value_error)
-        assert RaisesCheck(check, ValueError).check()
-
-    def test_check_raises_no_exception(self):
-        check = CustomCheck(lambda: True)
-        assert not RaisesCheck(check, ValueError).check()
-
-    def test_check_raises_wrong_exception(self):
-        def raise_type_error():
-            raise TypeError("Test")
-
-        check = CustomCheck(raise_type_error)
+    def test_raises_wrong_exception_propagates(self):
         with pytest.raises(TypeError):
-            RaisesCheck(check, ValueError).check()
+            raising(TypeError("boom")).raises(ValueError).check()
+
+    def test_absorbing_turns_errors_into_default(self):
+        assert raising(ValueError("boom")).absorbing(ValueError).check() is False
+        assert raising(ValueError("boom")).absorbing(default=True).check() is True
+
+    def test_absorbing_leaves_other_exceptions(self):
+        with pytest.raises(TypeError):
+            raising(TypeError("boom")).absorbing(ValueError).check()
+
+    def test_absorbing_makes_waits_safe(self):
+        counter = Counter(true_after=3)
+
+        def flaky() -> bool:
+            counter.calls += 1
+            if counter.calls < 3:
+                raise ValueError("not ready")
+            return True
+
+        safe = Check(flaky).absorbing(ValueError)
+        assert safe.wait(poll_interval=timedelta(milliseconds=1)).check()
 
 
-class TestFilesystemChecks:
-    def test_file_exists_check(self, tmp_path: Path):
-        existing_file = tmp_path / "exists.txt"
-        existing_file.touch()
-        missing_file = tmp_path / "missing.txt"
-
-        assert FileExistsCheck(existing_file).check()
-        assert not FileExistsCheck(missing_file).check()
-
-    def test_directory_exists_check(self, tmp_path: Path):
-        existing_dir = tmp_path / "exists_dir"
-        existing_dir.mkdir()
-        missing_dir = tmp_path / "missing_dir"
-
-        assert DirectoryExistsCheck(existing_dir).check()
-        assert not DirectoryExistsCheck(missing_dir).check()
-
-    def test_file_contains_check(self, tmp_path: Path):
-        file_path = tmp_path / "test.txt"
-        file_path.write_text("hello fluent checks")
-
-        assert FileContainsCheck(file_path, b"fluent").check()
-        assert not FileContainsCheck(file_path, b"world").check()
-        assert not FileContainsCheck(tmp_path / "no.txt", b"").check()
+# --- background --------------------------------------------------------
 
 
-class TestComparisonChecks:
+class TestBackground:
+    def test_lifecycle(self):
+        slow = always(True).with_delay(timedelta(milliseconds=50))
+        background = slow.background()
+        assert not background.is_finished().check()
+        assert background.result() is None
+
+        background.start()
+        assert background.result() is None  # still running
+
+        background.join()
+        assert background.is_finished().check()
+        assert background.result() is True
+
+    @pytest.mark.parametrize("result", [True, False])
+    def test_result(self, result):
+        background = always(result).with_delay(timedelta(milliseconds=20)).background()
+        assert background.check() == result  # blocking evaluation
+
+    def test_crashed_check_reraises(self):
+        background = raising(ValueError("boom")).background().start().join()
+        with pytest.raises(ValueError):
+            background.result()
+
+    def test_context_manager_joins(self):
+        slow = always(True).with_delay(timedelta(milliseconds=30))
+        with slow.background() as background:
+            pass
+        assert background.is_finished().check()
+        assert background.result() is True
+
+
+# --- filesystem --------------------------------------------------------
+
+
+class TestFilesystem:
+    def test_file_exists(self, tmp_path: Path):
+        present = tmp_path / "exists.txt"
+        present.touch()
+        assert file_exists(present).check()
+        assert not file_exists(tmp_path / "missing.txt").check()
+
+    def test_dir_exists(self, tmp_path: Path):
+        directory = tmp_path / "dir"
+        directory.mkdir()
+        assert dir_exists(directory).check()
+        assert not dir_exists(tmp_path / "missing").check()
+
+    def test_file_contains(self, tmp_path: Path):
+        path = tmp_path / "test.txt"
+        path.write_text("hello fluent checks")
+        assert file_contains(path, b"fluent").check()
+        assert not file_contains(path, b"world").check()
+        assert not file_contains(tmp_path / "missing.txt", b"").check()
+
+    def test_checks_are_live(self, tmp_path: Path):
+        """A Check observes the world at check() time, not construction time."""
+        path = tmp_path / "later.txt"
+        exists = file_exists(path)
+        assert not exists.check()
+        path.touch()
+        assert exists.check()
+
+
+# --- comparisons -------------------------------------------------------
+
+
+class TestComparisons:
     @pytest.mark.parametrize(
-        "lhs, rhs, expected",
-        [(1, 1, True), (1, 2, False), ("a", "a", True), ("a", "b", False)],
-    )
-    def test_is_equal(self, lhs, rhs, expected: bool):
-        assert is_equal(lhs, rhs).check() == expected
-
-    @pytest.mark.parametrize(
-        "lhs, rhs, expected",
-        [(1, 2, True), (1, 1, False), ("a", "b", True), ("a", "a", False)],
-    )
-    def test_is_not_equal(self, lhs, rhs, expected: bool):
-        assert is_not_equal(lhs, rhs).check() == expected
-
-    @pytest.mark.parametrize(
-        "lhs, rhs, expected", [(2, 1, True), (1, 1, False), (1, 2, False)]
-    )
-    def test_is_greater_than(self, lhs, rhs, expected: bool):
-        assert is_greater_than(lhs, rhs).check() == expected
-
-    @pytest.mark.parametrize(
-        "lhs, rhs, expected", [(1, 2, True), (1, 1, False), (2, 1, False)]
-    )
-    def test_is_less_than(self, lhs, rhs, expected: bool):
-        assert is_less_than(lhs, rhs).check() == expected
-
-    @pytest.mark.parametrize(
-        "needle, haystack, expected",
+        "factory, args, expected",
         [
-            (1, [1, 2, 3], True),
-            (4, [1, 2, 3], False),
-            ("a", "abc", True),
-            ("d", "abc", False),
+            (is_equal, (1, 1), True),
+            (is_equal, (1, 2), False),
+            (is_not_equal, (1, 2), True),
+            (is_not_equal, (1, 1), False),
+            (is_greater_than, (2, 1), True),
+            (is_greater_than, (1, 2), False),
+            (is_less_than, (1, 2), True),
+            (is_less_than, (2, 1), False),
+            (is_in, (1, [1, 2, 3]), True),
+            (is_in, (4, [1, 2, 3]), False),
+            (is_instance_of, (1, int), True),
+            (is_instance_of, ("a", int), False),
         ],
     )
-    def test_is_in(self, needle, haystack, expected: bool):
-        assert is_in(needle, haystack).check() == expected
-
-    @pytest.mark.parametrize(
-        "obj, cls, expected",
-        [(1, int, True), ("a", str, True), (1, str, False), ("a", int, False)],
-    )
-    def test_is_instance_of(self, obj, cls, expected: bool):
-        assert is_instance_of(obj, cls).check() == expected
+    def test_comparisons(self, factory, args, expected):
+        assert factory(*args).check() == expected
